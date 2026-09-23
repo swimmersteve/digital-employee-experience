@@ -97,7 +97,7 @@ param(
 Set-StrictMode -Version 1.0
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.7.0'
+$ScriptVersion = '1.8.0'
 $PlaLogName    = 'Microsoft-Windows-Diagnosis-PLA/Operational'
 $DiagPerfLog   = 'Microsoft-Windows-Diagnostics-Performance/Operational'
 
@@ -543,17 +543,27 @@ function Get-PerfSample {
 
 function Get-TopProcesses {
     <#
-      Groups processes by name and returns the UNION of the top N by working set
-      and the top N by CPU, so the dashboard can rank either way from one list.
-      The two sets overlap heavily but not completely -- the process burning CPU
-      is often not the one holding memory, which is the whole reason both panes
-      exist. Storing the union rather than two separate arrays keeps roughly a
-      quarter of the bytes out of the store.
+      Groups processes by name and returns the UNION of the top N by working set,
+      the top N by CPU and the top N by I/O throughput, so the dashboard can rank
+      three ways from one list. The sets overlap heavily but not completely -- the
+      process burning CPU is rarely the one holding memory, and neither is usually
+      the one hammering the disk, which is the whole reason three panes exist.
+      Storing the union rather than three separate arrays keeps most of the
+      duplication out of the store.
 
-      CPU percentage is a true interval figure: cumulative CPU seconds are diffed
-      against the previous run's baseline held in state.json, divided by elapsed
-      wall time and logical core count. An instantaneous per-process CPU reading
-      would be noise. It is $null until there is a baseline to diff against.
+      CPU percentage and I/O rate are both true INTERVAL figures: the cumulative
+      counters are diffed against the previous run's baseline held in state.json
+      and divided by elapsed wall time. An instantaneous per-process reading would
+      be noise. Both are $null until there is a baseline to diff against.
+
+      Caveat on I/O, stated plainly because it changes how the number reads:
+      Win32_Process ReadTransferCount/WriteTransferCount count bytes through ALL
+      file-handle I/O -- disk, yes, but also reads served from the filesystem
+      cache, named pipes and sockets. There is no per-process disk-only byte
+      counter in Windows short of an ETW session, which is far too heavy for a
+      10-minute poll. So this ranks I/O demand, not confirmed platter traffic. The
+      machine-wide disk-busy chart above is the measured figure; use this pane to
+      find the process most likely responsible for it.
     #>
     param([int]$Top = 10)
 
@@ -575,13 +585,45 @@ function Get-TopProcesses {
     }
     if ($now.Count -eq 0) { return @() }
 
+    # Cumulative per-process I/O bytes. Win32_Process carries these directly, so
+    # this is one CIM query rather than a second enumeration -- and the property
+    # projection matters: pulling the whole class drags CommandLine and
+    # ExecutablePath along for every process and costs several times as much.
+    $ioNow = @{}
+    try {
+        Get-CimInstance -ClassName Win32_Process `
+                        -Property Name, ReadTransferCount, WriteTransferCount `
+                        -ErrorAction Stop |
+            ForEach-Object {
+                $nm = [string]$_.Name
+                if ($nm -match '^(.*)\.exe$') { $nm = $Matches[1] }   # match Get-Process naming
+                $b  = [double]$_.ReadTransferCount + [double]$_.WriteTransferCount
+                if ($ioNow.ContainsKey($nm)) { $ioNow[$nm] += $b } else { $ioNow[$nm] = $b }
+            }
+    } catch {
+        Write-Log "Per-process I/O unavailable: $($_.Exception.Message)" 'WARN'
+        $ioNow = @{}
+    }
+    foreach ($p in $now) {
+        $cum = $null
+        if ($ioNow.ContainsKey($p.n)) { $cum = $ioNow[$p.n] }
+        Add-Member -InputObject $p -NotePropertyName 'iocum' -NotePropertyValue $cum
+    }
+
     $prevMap  = Get-StateProperty -Object $state -Name 'ProcCpu'
     $prevAt   = ConvertTo-Utc -Value (Get-StateProperty -Object $state -Name 'ProcCpuAt') -Default ([datetime]::MinValue)
     $elapsed  = ($RunStart.ToUniversalTime() - $prevAt).TotalSeconds
     $canDelta = ($prevAt -gt [datetime]::MinValue) -and ($elapsed -gt 5) -and ($elapsed -lt 7200)
 
-    # Interval CPU% for EVERY process first -- ranking by CPU is impossible if the
-    # delta is only computed for the processes that happen to lead on memory.
+    $prevIo = Get-StateProperty -Object $state -Name 'ProcIo'
+
+    # Interval CPU% and I/O rate for EVERY process first -- ranking by either is
+    # impossible if the delta is only computed for the processes that happen to
+    # lead on memory.
+    #
+    # A negative delta means the cumulative counter went backwards, which happens
+    # whenever a process in the group exited between runs. That interval is
+    # unknowable rather than zero, so it is dropped instead of being clamped.
     foreach ($p in $now) {
         $pct = $null
         if ($canDelta -and $prevMap -and ($prevMap.PSObject.Properties.Name -contains $p.n)) {
@@ -589,6 +631,14 @@ function Get-TopProcesses {
             if ($delta -ge 0) { $pct = [math]::Round(($delta / $elapsed / $cores) * 100, 1) }
         }
         Add-Member -InputObject $p -NotePropertyName 'pct' -NotePropertyValue $pct
+
+        $kbs = $null
+        if ($canDelta -and $prevIo -and ($null -ne $p.iocum) -and
+            ($prevIo.PSObject.Properties.Name -contains $p.n)) {
+            $dio = [double]$p.iocum - [double]$prevIo.$($p.n)
+            if ($dio -ge 0) { $kbs = [math]::Round(($dio / $elapsed) / 1KB, 1) }
+        }
+        Add-Member -InputObject $p -NotePropertyName 'iokbs' -NotePropertyValue $kbs
     }
 
     # NB: do not name these $top. PowerShell variable names are case-insensitive,
@@ -596,17 +646,20 @@ function Get-TopProcesses {
     # would overwrite the parameter with an array in the middle of its own use.
     $byMem = @($now | Sort-Object -Property ws -Descending | Select-Object -First $Top)
     $byCpu = @()
+    $byIo  = @()
     if ($canDelta) {
         $byCpu = @($now | Where-Object { $null -ne $_.pct -and $_.pct -gt 0 } |
                    Sort-Object -Property pct -Descending | Select-Object -First $Top)
+        $byIo  = @($now | Where-Object { $null -ne $_.iokbs -and $_.iokbs -gt 0 } |
+                   Sort-Object -Property iokbs -Descending | Select-Object -First $Top)
     }
 
     $seen = @{}
     $out  = New-Object System.Collections.Generic.List[object]
-    foreach ($p in (@($byMem) + @($byCpu))) {
+    foreach ($p in (@($byMem) + @($byCpu) + @($byIo))) {
         if ($seen.ContainsKey($p.n)) { continue }
         $seen[$p.n] = $true
-        $out.Add([pscustomobject][ordered]@{ n = $p.n; ws = $p.ws; c = $p.c; cpu = $p.pct })
+        $out.Add([pscustomobject][ordered]@{ n = $p.n; ws = $p.ws; c = $p.c; cpu = $p.pct; io = $p.iokbs })
     }
 
     # Refresh the baseline. Bound it: only processes that have actually used CPU,
@@ -617,6 +670,15 @@ function Get-TopProcesses {
     }
     Set-StateProperty -Object $state -Name 'ProcCpu'   -Value ([pscustomobject]$newMap)
     Set-StateProperty -Object $state -Name 'ProcCpuAt' -Value (Get-UtcStamp $RunStart)
+
+    # Same bound for the I/O baseline. Names only, no pids, so state.json stays a
+    # few KB however many processes come and go.
+    $ioMap = [ordered]@{}
+    foreach ($p in @($now | Where-Object { $null -ne $_.iocum -and $_.iocum -gt 0 } |
+                     Sort-Object -Property iocum -Descending | Select-Object -First 200)) {
+        $ioMap[$p.n] = [double]$p.iocum
+    }
+    Set-StateProperty -Object $state -Name 'ProcIo' -Value ([pscustomobject]$ioMap)
 
     return $out.ToArray()
 }

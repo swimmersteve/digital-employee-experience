@@ -254,7 +254,7 @@ C:\ProgramData\EndpointHealth\
     meta.js            <- one line: host, cores, uptime, last run
     events.ndjson      <- durable event store, one JSON object per line
     perf.ndjson        <- durable usage store
-    state.json         <- watermarks + per-process CPU baselines
+    state.json         <- watermarks + per-process CPU and I/O baselines
     collector.log      <- the collector's own log
 ```
 
@@ -373,39 +373,62 @@ there if you ever want a pane back. To stop collecting them entirely, pass
 Two samples a second apart, because rate counters need a delta and a single read
 can legitimately return zero.
 
-### Top processes — two panes
+### Top processes — three panes
 
-**Top 10 by CPU** on the left, **top 10 by memory** on the right — each sitting
-directly under the chart it belongs to, so the CPU column and the memory column
-read top to bottom. These are genuinely different lists: the process burning CPU
+**Top 10 by CPU**, **top 10 by memory**, **top 10 by disk activity** — each sitting
+directly under the chart it belongs to, so each column reads top to bottom. These
+are genuinely different lists: the process burning CPU
 is usually not the one holding memory (audiodg, dwm, SearchIndexer and TiWorker
-show up on one, Code and chrome on the other), which is the whole reason there are
-two panes.
+show up on one, Code and chrome on the other), and neither is reliably the one
+hammering the disk — which is the whole reason there are three panes.
 
-The CPU pane labels percentages only. A `1.3 GB` sitting next to a percentage
-makes the bar look like it measures memory; working set is still one hover away in
-the row tooltip. The memory pane keeps its CPU figure, since `473 MB · 2.2%` reads
+Each pane labels its own metric only. A `1.3 GB` sitting next to a percentage makes
+the bar look like it measures memory; the other figures are one hover away in the
+row tooltip. The memory pane keeps its CPU figure, since `473 MB · 2.2%` reads
 unambiguously — say the word if you want that stripped too.
 
 Processes are grouped by name and summed across instances; `×12` means twelve
-processes of that name. Bar colour matches the chart above it — orange for memory,
-blue for CPU.
+processes of that name. Bar colour matches the chart above it — blue for CPU,
+orange for memory, aqua for disk.
 
-CPU % is a **true interval average**, not an instantaneous reading: cumulative CPU
-seconds are diffed against the previous run's baseline in `state.json`, divided by
-elapsed wall time and logical core count. The CPU pane therefore needs two runs
-before it has anything to show, and says so until then.
+CPU % and disk I/O are both **true interval averages**, not instantaneous readings:
+the cumulative counters are diffed against the previous run's baseline in
+`state.json` and divided by elapsed wall time (CPU also by logical core count).
+Both panes therefore need two runs before they have anything to show, and say so
+until then. A negative delta — which happens whenever one process of a group exits
+between runs — is dropped rather than clamped to zero, because that interval is
+unknowable, not idle.
 
-The collector stores the **union** of the two top-10 sets rather than two separate
-arrays — they overlap heavily, so the union is typically 12–16 entries instead of
-20, which keeps roughly a quarter of the bytes out of the store. Each pane re-ranks
-that one array by its own metric. `-TopProcessCount` changes the depth of both.
+#### What the disk pane actually measures (1.8.0)
 
-**Click any point on the CPU or memory chart** and the process pane rewinds to that
-moment — the top processes as they were in that sample, with the CPU each used over
-the interval ending there. The selected sample is marked on both charts, and both
-headline figures switch to its values so CPU, memory and processes always describe
-the same instant. Click the same point again, or use **Back to latest**, to return.
+Per-process disk bytes come from `Win32_Process`, whose `ReadTransferCount` and
+`WriteTransferCount` are cumulative since process start. One CIM query with an
+explicit property projection — pulling the whole class drags `CommandLine` and
+`ExecutablePath` along for every process and costs several times as much.
+
+**These count bytes through all file-handle I/O**: disk, yes, but also reads served
+from the filesystem cache, plus named pipes and sockets. Windows has no
+per-process disk-only byte counter short of an ETW session, which is far too heavy
+for a 10-minute poll — Resource Monitor can show you true per-process disk bytes
+precisely because it runs one while it is open. So read this pane as **I/O demand**,
+and the machine-wide disk-busy chart above it as the measured truth. Together they
+answer "the disk was pinned at 14:20 — who was most likely doing it?", which is the
+actual question.
+
+If the CIM query fails, the collector logs `Per-process I/O unavailable` and carries
+on; the CPU and memory panes are unaffected and the disk pane says what to check.
+
+The collector stores the **union** of the three top-10 sets rather than three
+separate arrays — they overlap heavily, so the union is typically 14–20 entries
+instead of 30. Each pane re-ranks that one array by its own metric, which is also
+why a pane can legitimately show fewer than 10 rows: a process outside all three
+unions was never stored. `-TopProcessCount` changes the depth of all three.
+
+**Click any point on the CPU, memory or disk chart** and the process panes rewind to that
+moment — the top processes as they were in that sample, with the CPU and I/O each
+used over the interval ending there. The selected sample is marked on all three
+charts, and every headline figure switches to its values so CPU, memory, disk and
+processes always describe the same instant. Click the same point again, or use **Back to latest**, to return.
 Changing the range drops a selection that falls outside the new window.
 
 This is the main way to answer "what was running when it spiked": find the spike,

@@ -252,7 +252,7 @@
       </section>
     </div>
 
-    <div class="grid2e" style="margin-bottom:16px">
+    <div class="grid3" style="margin-bottom:16px">
       <section class="card">
         <h2 id="cpuProcTitle">Top 10 processes by CPU</h2>
         <p class="hint" id="cpuProcHint">&nbsp;</p>
@@ -262,6 +262,11 @@
         <h2 id="memProcTitle">Top 10 processes by memory</h2>
         <p class="hint" id="memProcHint">&nbsp;</p>
         <div id="memProcChart"></div>
+      </section>
+      <section class="card">
+        <h2 id="ioProcTitle">Top 10 processes by disk activity</h2>
+        <p class="hint" id="ioProcHint">&nbsp;</p>
+        <div id="ioProcChart"></div>
       </section>
     </div>
 
@@ -699,9 +704,11 @@
   }
 
   // ---- process panes -------------------------------------------------------
-  // The collector stores the union of the top-N-by-memory and top-N-by-CPU sets,
-  // so each pane re-ranks the same array by its own metric. A process can lead on
-  // one and be absent from the other's top 10 -- that is the point of two panes.
+  // The collector stores the union of the top-N-by-memory, top-N-by-CPU and
+  // top-N-by-I/O sets, so each pane re-ranks the same array by its own metric. A
+  // process can lead on one and be absent from another's top 10 -- that is the
+  // point of three panes. A process outside all three unions is simply not in the
+  // array, which is why a pane can show fewer than 10 rows.
   function procPane(cfg) {
     var host = $(cfg.host);
     var all = (cfg.rec && cfg.rec.procs) ? cfg.rec.procs.slice() : [];
@@ -716,11 +723,17 @@
     }
 
     var ps;
-    if (cfg.metric === "cpu") {
-      ps = all.filter(function (p) { return p.cpu != null; })
-              .sort(function (a, b) { return b.cpu - a.cpu; }).slice(0, 10);
+    if (cfg.metric === "cpu" || cfg.metric === "io") {
+      // Both are interval rates diffed against the previous run, so both are null
+      // until a baseline exists. Distinguish "no baseline yet" from "the counter
+      // isn't available on this machine" -- they need different answers.
+      ps = all.filter(function (p) { return p[cfg.metric] != null; })
+              .sort(function (a, b) { return b[cfg.metric] - a[cfg.metric]; }).slice(0, 10);
       if (!ps.length) {
-        $(cfg.hint).textContent = "CPU ranking needs two runs to diff against — no baseline in this sample yet.";
+        $(cfg.hint).textContent = cfg.metric === "cpu"
+          ? "CPU ranking needs two runs to diff against — no baseline in this sample yet."
+          : "Disk ranking needs two runs to diff against, and collector 1.8.0 or later. " +
+            "If it stays empty, check collector.log for “Per-process I/O unavailable”.";
         host.innerHTML = '<div class="empty">Waiting for a second sample.</div>';
         return;
       }
@@ -728,26 +741,30 @@
       ps = all.slice().sort(function (a, b) { return b.ws - a.ws; }).slice(0, 10);
     }
 
+    var BLURB = {
+      cpu: "Average share of all cores over the interval since the previous run.",
+      ws:  "Working set, summed across instances of the same name.",
+      io:  "Read + write throughput averaged over the interval. Counts all file-handle " +
+           "I/O, including cache hits — disk demand, not confirmed platter traffic."
+    };
     $(cfg.hint).innerHTML = cfg.isPicked
       ? '<b style="color:var(--ink)">' + esc(fmtDT(cfg.rec.t)) + "</b> — the sample you picked. " +
-        (cfg.metric === "cpu" ? "Average over the interval ending then. " : "") +
+        (cfg.metric === "ws" ? "" : "Average over the interval ending then. ") +
         '<button type="button" class="linkbtn" data-clearpick="1">Back to latest</button>'
-      : "Latest sample, " + esc(ago(cfg.rec.t)) + ". " +
-        (cfg.metric === "cpu"
-          ? "Average share of all cores over the interval since the previous run."
-          : "Working set, summed across instances of the same name.") +
-        " Click a point on either chart above to see that moment.";
+      : "Latest sample, " + esc(ago(cfg.rec.t)) + ". " + BLURB[cfg.metric] +
+        " Click a point on any chart above to see that moment.";
 
     Array.prototype.forEach.call(host.parentNode.querySelectorAll("[data-clearpick]"), function (b) {
       b.addEventListener("click", function () { state.pickedT = null; renderUsage(); });
     });
 
-    var maxV = cfg.metric === "cpu" ? Math.max.apply(null, ps.map(function (p) { return p.cpu; }))
-                                    : ps[0].ws;
+    var maxV = cfg.metric === "ws" ? ps[0].ws
+                                   : Math.max.apply(null, ps.map(function (p) { return p[cfg.metric]; }));
     if (!(maxV > 0)) maxV = 1;
 
     var rowH = 26, W = 560, labelW = 122, barX = labelW + 8;
-    var PR = cfg.metric === "cpu" ? 52 : 122;   // "21.5%" needs far less room than "1.3 GB · 7.4%"
+    // Room for the value label: "21.5%" needs far less than "1.3 GB · 7.4%".
+    var PR = cfg.metric === "cpu" ? 52 : (cfg.metric === "io" ? 74 : 122);
     var barMax = W - barX - PR, H = ps.length * rowH + 6;
     var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.titleText });
 
@@ -758,23 +775,24 @@
       t.textContent = nm + (p.c > 1 ? " ×" + p.c : "");
       svg.appendChild(t);
 
-      var v = cfg.metric === "cpu" ? p.cpu : p.ws;
+      var v = cfg.metric === "ws" ? p.ws : p[cfg.metric];
       var w = Math.max(2, (v / maxV) * barMax);
       svg.appendChild(el("path", { d: roundedRight(barX, y, w, bh, 4), fill: cfg.color }));
 
       var vl = el("text", { class: "dlabel", x: barX + w + 7, y: y + bh - 2 });
-      // The CPU pane shows CPU only -- a GB figure beside a percentage reads as if
-      // the bar measured memory. Working set is still in the row's tooltip.
-      vl.textContent = cfg.metric === "cpu"
-        ? p.cpu.toFixed(1) + "%"
-        : fmtMB(p.ws) + (p.cpu != null ? " · " + p.cpu.toFixed(1) + "%" : "");
+      // Each pane labels its own metric only. A GB figure beside a percentage
+      // reads as if the bar measured memory; the other figures are in the tooltip.
+      vl.textContent = cfg.metric === "cpu" ? p.cpu.toFixed(1) + "%"
+                     : cfg.metric === "io"  ? fmtKBs(p.io)
+                     : fmtMB(p.ws) + (p.cpu != null ? " · " + p.cpu.toFixed(1) + "%" : "");
       svg.appendChild(vl);
 
       var hit = el("rect", { x: 0, y: y - 5, width: W, height: rowH, fill: "transparent" });
       bindTip(hit, '<div class="tt">' + esc(p.n) + "</div>" +
         '<div class="tr"><span>Working set</span><span class="tv">' + fmtMB(p.ws) + "</span></div>" +
         '<div class="tr"><span>Instances</span><span class="tv">' + p.c + "</span></div>" +
-        (p.cpu != null ? '<div class="tr"><span>CPU (interval avg)</span><span class="tv">' + p.cpu.toFixed(1) + "%</span></div>" : ""));
+        (p.cpu != null ? '<div class="tr"><span>CPU (interval avg)</span><span class="tv">' + p.cpu.toFixed(1) + "%</span></div>" : "") +
+        (p.io  != null ? '<div class="tr"><span>Disk I/O (interval avg)</span><span class="tv">' + fmtKBs(p.io) + "</span></div>" : ""));
       svg.appendChild(hit);
     });
     host.appendChild(svg);
@@ -784,12 +802,24 @@
     return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB";
   }
 
+  // Stored as KB/s. Idle machines sit in the single digits and a build or a scan
+  // runs to hundreds of MB/s, so the unit has to move with the value.
+  function fmtKBs(kbs) {
+    if (kbs == null) return "—";
+    if (kbs >= 1024) return (kbs / 1024).toFixed(1) + " MB/s";
+    if (kbs >= 10)   return Math.round(kbs) + " KB/s";
+    return kbs.toFixed(1) + " KB/s";
+  }
+
   function renderProcs(rec, isPicked) {
     procPane({ host: "#cpuProcChart", title: "#cpuProcTitle", hint: "#cpuProcHint",
                titleText: "Top 10 processes by CPU", metric: "cpu", color: "var(--s1)",
                rec: rec, isPicked: isPicked });
     procPane({ host: "#memProcChart", title: "#memProcTitle", hint: "#memProcHint",
                titleText: "Top 10 processes by memory", metric: "ws", color: "var(--s2)",
+               rec: rec, isPicked: isPicked });
+    procPane({ host: "#ioProcChart", title: "#ioProcTitle", hint: "#ioProcHint",
+               titleText: "Top 10 processes by disk activity", metric: "io", color: "var(--s3)",
                rec: rec, isPicked: isPicked });
   }
 

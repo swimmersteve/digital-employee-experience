@@ -30,7 +30,7 @@
 [CmdletBinding()]
 param(
     [string] $InstallPath     = (Join-Path $env:ProgramData 'EndpointHealth'),
-    [int]    $IntervalMinutes = 10,
+    [int]    $IntervalMinutes = 1,
     [string] $TaskName        = 'EndpointHealth-Collector',
     [int]    $RetentionDays   = 30,
     [switch] $Uninstall
