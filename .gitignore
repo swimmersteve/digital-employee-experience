@@ -1,0 +1,38 @@
+# Collected telemetry. Written by the collector at the install path at runtime.
+# These carry the machine name, the signed-in user and a running list of the
+# processes they have open -- they do not belong in a repo, even a private one.
+events.ndjson
+perf.ndjson
+data.js
+perf.js
+status.js
+meta.js
+state.json
+collector.log
+
+# Whole-folder guard in case someone clones or points the collector inside the
+# repo rather than at C:\ProgramData\EndpointHealth.
+EndpointHealth/data/
+**/EndpointHealth-data/
+
+# Browser "save as" duplicates. These are the reason a stale collector can keep
+# running after what looks like a successful update -- never commit one.
+*-1.ps1
+*-2.ps1
+*-1.html
+*-2.html
+*-1.md
+* (1).*
+* - Copy.*
+
+# Perfmon binary logs, in case a .blg is ever dropped next to the scripts.
+*.blg
+*.etl
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+*~

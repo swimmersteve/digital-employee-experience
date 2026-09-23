@@ -1,0 +1,1165 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Endpoint Health</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane:        #f9f9f7;
+    --surface:      #fcfcfb;
+    --ink:          #0b0b0b;
+    --ink-2:        #52514e;
+    --ink-muted:    #898781;
+    --grid:         #e1e0d9;
+    --axis:         #c3c2b7;
+    --border:       rgba(11,11,11,0.10);
+    --shadow:       0 1px 2px rgba(11,11,11,0.05);
+    --crit:         #d03b3b;
+    --err:          #ec835a;
+    --info:         #2a78d6;
+    --s1:           #2a78d6;
+    --s2:           #eb6834;
+    --s3:           #1baf7a;
+    --good:         #0ca30c;
+    --warn:         #fab219;
+    --chip:         rgba(11,11,11,0.04);
+    --chip-on:      rgba(11,11,11,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+      --ink-muted: #898781; --grid: #2c2c2a; --axis: #383835;
+      --border: rgba(255,255,255,0.10); --shadow: none;
+      --crit: #d03b3b; --err: #ec835a; --info: #3987e5;
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #fab219;
+      --chip: rgba(255,255,255,0.06); --chip-on: rgba(255,255,255,0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+    --ink-muted: #898781; --grid: #2c2c2a; --axis: #383835;
+    --border: rgba(255,255,255,0.10); --shadow: none;
+    --crit: #d03b3b; --err: #ec835a; --info: #3987e5;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #fab219;
+    --chip: rgba(255,255,255,0.06); --chip-on: rgba(255,255,255,0.14);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--plane); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px 16px 64px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--ink-2); font-size: 13px; }
+  .sub b { font-weight: 600; color: var(--ink); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .btn {
+    font: inherit; font-size: 13px; color: var(--ink-2); background: var(--chip);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  .btn:hover { background: var(--chip-on); color: var(--ink); }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; margin-bottom: 20px; }
+  .fgroup { display: flex; align-items: center; gap: 6px; }
+  .flabel { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-muted); margin-right: 2px; }
+  .seg { display: inline-flex; background: var(--chip); border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
+  .seg button {
+    font: inherit; font-size: 13px; color: var(--ink-2); background: transparent;
+    border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
+  }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow); }
+  .sel {
+    font: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+    background: var(--chip); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; cursor: pointer; min-width: 116px;
+  }
+  .sel:hover { background: var(--chip-on); }
+  .sel:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+  .linkbtn {
+    font: inherit; font-size: 12px; color: var(--s1); background: none; border: 0;
+    padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .linkbtn:hover { color: var(--ink); }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 20px; box-shadow: var(--shadow);
+  }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  .card .hint { font-size: 12px; color: var(--ink-muted); margin: 0 0 14px; }
+  .sechead {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-muted);
+    font-weight: 600; margin: 26px 0 10px;
+  }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
+  .tile .lbl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+  .tile .val { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.1; }
+  .tile .sub2 { font-size: 11px; color: var(--ink-muted); margin-top: 2px; }
+  .ic { width: 12px; height: 12px; flex: none; }
+
+  .grid2  { display: grid; grid-template-columns: 1.55fr 1fr; gap: 16px; }
+  .grid2e { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .bootgrid { display: grid; grid-template-columns: minmax(230px, 320px) 1fr; gap: 12px 40px; align-items: start; }
+  @media (max-width: 720px) { .bootgrid { grid-template-columns: 1fr; } }
+  @media (max-width: 1180px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 860px)  { .grid2, .grid2e, .grid3 { grid-template-columns: 1fr; } }
+
+  .now { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
+  .now small { font-size: 12px; font-weight: 400; color: var(--ink-muted); margin-left: 3px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
+  .swatch { width: 10px; height: 3px; border-radius: 2px; flex: none; }
+
+  svg { display: block; width: 100%; overflow: visible; }
+  svg.natural { width: auto; max-width: 100%; height: auto; }
+  .tick { font-size: 10px; fill: var(--ink-muted); }
+  .tick.num { font-variant-numeric: tabular-nums; }
+  .dlabel { font-size: 11px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--axis); stroke-width: 1; }
+  .cross { stroke: var(--axis); stroke-width: 1; stroke-dasharray: 3 3; }
+
+  .kv { display: grid; grid-template-columns: auto auto; gap: 4px 16px; font-size: 13px; margin-top: 10px; }
+  .kv dt { color: var(--ink-2); }
+  .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th {
+    text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--ink-muted); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--axis);
+    white-space: nowrap; cursor: pointer; user-select: none;
+  }
+  th:hover { color: var(--ink); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.ts { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+  td.msg { color: var(--ink-2); max-width: 520px; }
+  tbody tr:hover { background: var(--chip); }
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .empty { padding: 36px 10px; text-align: center; color: var(--ink-muted); }
+
+  #tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.18); z-index: 50; max-width: 300px;
+  }
+  #tip .tt { font-weight: 600; margin-bottom: 4px; }
+  #tip .tr { display: flex; align-items: center; gap: 6px; }
+  #tip .tv { margin-left: auto; font-variant-numeric: tabular-nums; padding-left: 12px; }
+  .banner {
+    background: var(--chip); border: 1px solid var(--border); border-left: 3px solid var(--warn);
+    border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; color: var(--ink-2);
+  }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>Endpoint Health</h1>
+      <div class="sub" id="hostline">Loading&hellip;</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn" id="themeBtn" type="button">Dark mode</button>
+      <button class="btn" id="reloadBtn" type="button">Reload</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="filters">
+    <div class="fgroup">
+      <label class="flabel" for="selRange">Range</label>
+      <select id="selRange" class="sel">
+        <optgroup label="Hours">
+          <option value="1">1 hour</option>
+          <option value="4">4 hours</option>
+          <option value="6">6 hours</option>
+          <option value="12">12 hours</option>
+          <option value="24" selected>24 hours</option>
+        </optgroup>
+        <optgroup label="Days">
+          <option value="48">2 days</option>
+          <option value="72">3 days</option>
+          <option value="96">4 days</option>
+          <option value="120">5 days</option>
+        </optgroup>
+        <optgroup label="Weeks">
+          <option value="168">1 week</option>
+          <option value="336">2 weeks</option>
+          <option value="504">3 weeks</option>
+          <option value="672">4 weeks</option>
+          <option value="840">5 weeks</option>
+        </optgroup>
+        <optgroup label="Months">
+          <option value="720">1 month</option>
+        </optgroup>
+      </select>
+    </div>
+    <div class="fgroup">
+      <span class="flabel">Log</span>
+      <div class="seg" id="segLog">
+        <button type="button" data-v="all"         aria-pressed="true">All</button>
+        <button type="button" data-v="Application" aria-pressed="false">Application</button>
+        <button type="button" data-v="System"      aria-pressed="false">System</button>
+        <button type="button" data-v="PLA"         aria-pressed="false">Diagnosis&#8209;PLA</button>
+      </div>
+    </div>
+    <div class="fgroup">
+      <span class="flabel">Rows</span>
+      <div class="seg" id="segMode">
+        <button type="button" data-v="grouped" aria-pressed="true">Grouped</button>
+        <button type="button" data-v="raw"     aria-pressed="false">Every event</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ RESOURCE USAGE ============ -->
+  <div id="usageSection">
+    <div class="sechead">Resource usage</div>
+    <div class="grid3" style="margin-bottom:16px">
+      <section class="card">
+        <h2>CPU</h2>
+        <p class="hint" id="cpuNow">&nbsp;</p>
+        <div id="cpuChart"></div>
+      </section>
+      <section class="card">
+        <h2>Memory</h2>
+        <p class="hint" id="memNow">&nbsp;</p>
+        <div id="memChart"></div>
+      </section>
+      <section class="card">
+        <h2>Disk activity</h2>
+        <p class="hint" id="dskNow">&nbsp;</p>
+        <div id="dskChart"></div>
+      </section>
+    </div>
+
+    <div class="grid2e" style="margin-bottom:16px">
+      <section class="card">
+        <h2 id="cpuProcTitle">Top 10 processes by CPU</h2>
+        <p class="hint" id="cpuProcHint">&nbsp;</p>
+        <div id="cpuProcChart"></div>
+      </section>
+      <section class="card">
+        <h2 id="memProcTitle">Top 10 processes by memory</h2>
+        <p class="hint" id="memProcHint">&nbsp;</p>
+        <div id="memProcChart"></div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-bottom:16px">
+      <h2>Boot and logon</h2>
+      <p class="hint" id="bootHint">&nbsp;</p>
+      <div class="bootgrid" id="bootBody"></div>
+    </section>
+  </div>
+
+  <!-- ============ EVENTS ============ -->
+  <div class="sechead">Event log</div>
+  <div class="tiles" id="tiles" style="margin-bottom:16px"></div>
+
+  <div class="grid2" style="margin-bottom:16px">
+    <section class="card">
+      <h2>Events over time</h2>
+      <p class="hint" id="timeHint">&nbsp;</p>
+      <div class="legend" id="timeLegend"></div>
+      <div id="timeChart"></div>
+    </section>
+    <section class="card">
+      <h2>Noisiest sources</h2>
+      <p class="hint">Top 8 providers in range, by event count.</p>
+      <div id="srcChart"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2 id="tableTitle">Events</h2>
+    <p class="hint" id="tableHint">&nbsp;</p>
+    <div class="tablewrap"><table id="tbl">
+      <thead><tr id="thead"></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table></div>
+  </section>
+
+</div>
+<div id="tip" role="tooltip"></div>
+
+<!-- Data is loaded as plain scripts so this page works straight off the filesystem
+     (file:// blocks fetch/XHR, but classic <script src> is allowed). -->
+<script>var EH = []; var EHP = []; var EH_META = {};</script>
+<script src="meta.js"></script>
+<script src="data.js"></script>
+<script src="perf.js"></script>
+
+<script>
+(function () {
+  "use strict";
+
+  var PLA = "Microsoft-Windows-Diagnosis-PLA/Operational";
+  var COLORS = { Critical: "var(--crit)", Error: "var(--err)", Diagnostics: "var(--info)" };
+
+  // Icon + label pairing: a status color never carries meaning alone.
+  var ICONS = {
+    Critical:    '<svg class="ic" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5.2" fill="var(--crit)"/><rect x="5.25" y="2.6" width="1.5" height="4.2" rx=".75" fill="#fff"/><circle cx="6" cy="8.85" r=".95" fill="#fff"/></svg>',
+    Error:       '<svg class="ic" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 .8 11.6 10.9H.4z" fill="var(--err)"/><rect x="5.3" y="4.2" width="1.4" height="3.5" rx=".7" fill="#1a1a19"/><circle cx="6" cy="9.3" r=".85" fill="#1a1a19"/></svg>',
+    Diagnostics: '<svg class="ic" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5.2" fill="var(--info)"/><rect x="5.25" y="5" width="1.5" height="4" rx=".75" fill="#fff"/><circle cx="6" cy="3.15" r=".95" fill="#fff"/></svg>'
+  };
+
+  var state = { rangeH: 24, log: "all", mode: "grouped", sortKey: "last", sortDir: -1, pickedT: null };
+
+  // ---- normalize -----------------------------------------------------------
+  var rows = (EH || []).map(function (e) {
+    var isPla = e.log === PLA;
+    return {
+      t: Date.parse(e.t), iso: e.t,
+      log: isPla ? "PLA" : e.log, logFull: e.log, lvl: e.lvl,
+      cls: isPla ? "Diagnostics" : (e.lvl === "Critical" ? "Critical" : "Error"),
+      src: e.src || "(unknown)", id: e.id, msg: e.msg || ""
+    };
+  }).filter(function (r) { return !isNaN(r.t); });
+  rows.sort(function (a, b) { return a.t - b.t; });
+
+  var perf = [], boots = [];
+  (EHP || []).forEach(function (p) {
+    var t = Date.parse(p.t);
+    if (isNaN(t)) return;
+    if (p.k === "b") { boots.push(Object.assign({}, p, { t: t })); }
+    else { perf.push(Object.assign({}, p, { t: t })); }
+  });
+  perf.sort(function (a, b) { return a.t - b.t; });
+  boots.sort(function (a, b) { return a.t - b.t; });
+
+  // ---- helpers -------------------------------------------------------------
+  var $ = function (s) { return document.querySelector(s); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]; }); }
+  function fmtDT(ms) {
+    var d = new Date(ms);
+    return d.toLocaleDateString(undefined, { month: "short", day: "2-digit" }) + " " +
+           d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  function ago(ms) {
+    var s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 90) return Math.round(s) + "s ago";
+    if (s < 5400) return Math.round(s / 60) + "m ago";
+    if (s < 172800) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  }
+  function dur(ms) {
+    var h = Math.floor(ms / 3600000), d = Math.floor(h / 24);
+    return d > 0 ? d + "d " + (h % 24) + "h" : h + "h " + Math.floor((ms % 3600000) / 60000) + "m";
+  }
+  function secs(ms) {
+    if (ms == null) return "—";
+    if (ms < 1000) return ms + " ms";
+    var s = ms / 1000;
+    return (s >= 100 ? Math.round(s) : s.toFixed(1)) + " s";
+  }
+  function num(v, dp) { return v == null ? "—" : Number(v).toFixed(dp == null ? 1 : dp); }
+
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function el(n, a) { var e = document.createElementNS(SVGNS, n); for (var k in a) if (a[k] != null) e.setAttribute(k, a[k]); return e; }
+
+  var tip = $("#tip");
+  function showTip(ev, html) {
+    tip.innerHTML = html; tip.style.opacity = 1;
+    var r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(ev.clientX + 14, window.innerWidth - r.width - 10) + "px";
+    tip.style.top = Math.max(8, ev.clientY - r.height - 12) + "px";
+  }
+  function hideTip() { tip.style.opacity = 0; }
+  function bindTip(node, html) {
+    node.addEventListener("mousemove", function (ev) { showTip(ev, html); });
+    node.addEventListener("mouseleave", hideTip);
+  }
+
+  // Local-aligned buckets, so axis labels match the clock on the wall and survive DST.
+  function makeBuckets(stepMin, n) {
+    var cur = new Date();
+    if (stepMin >= 1440) { cur.setHours(0, 0, 0, 0); }
+    else if (stepMin >= 60) { cur.setMinutes(0, 0, 0); }
+    else { cur.setMinutes(Math.floor(cur.getMinutes() / stepMin) * stepMin, 0, 0); }
+    var out = [];
+    for (var i = n - 1; i >= 0; i--) {
+      var d = new Date(cur);
+      if (stepMin >= 1440) d.setDate(d.getDate() - i * (stepMin / 1440));
+      else d.setMinutes(d.getMinutes() - i * stepMin);
+      out.push(d.getTime());
+    }
+    return out;
+  }
+  function bucketIndex(edges, t) {
+    if (t < edges[0]) return -1;
+    var lo = 0, hi = edges.length - 1;
+    while (lo < hi) { var mid = (lo + hi + 1) >> 1; if (edges[mid] <= t) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function niceCeil(max, floorTo) {
+    var m = Math.max(max, floorTo || 0);
+    if (m <= 0) return floorTo || 1;
+    var step = Math.pow(10, Math.floor(Math.log10(m)));
+    var c = Math.ceil(m / step) * step;
+    if (c === m) c = m + step * 0.5;
+    return c;
+  }
+
+  // ---- range helpers -------------------------------------------------------
+  // With 16 selectable ranges, nothing about the charts can assume "hourly or
+  // daily" any more -- bucket size and label format are both derived.
+
+  var RANGE_LABELS = {
+    1: "last hour", 4: "last 4 hours", 6: "last 6 hours", 12: "last 12 hours",
+    24: "last 24 hours", 48: "last 2 days", 72: "last 3 days", 96: "last 4 days",
+    120: "last 5 days", 168: "last week", 336: "last 2 weeks", 504: "last 3 weeks",
+    672: "last 4 weeks", 720: "last month", 840: "last 5 weeks"
+  };
+  function rangeLabel() {
+    return RANGE_LABELS[state.rangeH] ||
+           (state.rangeH < 24 ? "last " + state.rangeH + "h" : "last " + Math.round(state.rangeH / 24) + "d");
+  }
+
+  // Bucket ladder, in minutes. Pick the smallest step that keeps the bar count
+  // at or under 48 -- below that bars get too thin to read, above it too coarse.
+  var STEP_LADDER = [5, 10, 15, 30, 60, 120, 180, 240, 360, 720, 1440];
+  function pickStep(hours) {
+    var mins = hours * 60;
+    for (var i = 0; i < STEP_LADDER.length; i++) {
+      if (mins / STEP_LADDER[i] <= 48) return STEP_LADDER[i];
+    }
+    return STEP_LADDER[STEP_LADDER.length - 1];
+  }
+  function stepName(min) {
+    if (min < 60) return min + " minutes";
+    if (min === 60) return "hour";
+    if (min < 1440) return (min / 60) + " hours";
+    return min === 1440 ? "day" : (min / 1440) + " days";
+  }
+
+  // Axis label format: a bare clock time is ambiguous once the window spans
+  // more than a day; a bare date is useless once it spans less than one.
+  function tickFormatter(hours) {
+    if (hours <= 24) {
+      return function (t) { return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }); };
+    }
+    if (hours <= 168) {
+      return function (t) {
+        var d = new Date(t);
+        return d.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }) + " " +
+               d.toLocaleTimeString(undefined, { hour: "2-digit", hour12: false }) + "h";
+      };
+    }
+    return function (t) { return new Date(t).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }); };
+  }
+
+  // ---- generic line chart --------------------------------------------------
+  function lineChart(host, opts) {
+    // opts: { t0, t1, series:[{name,color,pts:[{t,v}]}], yMax, unit, dp, W, H,
+    //         label, fmtTick, gapMs }
+    //
+    // Plots one mark per SAMPLE on a real time axis -- x is the timestamp, not an
+    // array index -- so a gap in collection shows as a gap, and points are never
+    // averaged into buckets.
+    host.innerHTML = "";
+    var W = opts.W || 520, H = opts.H || 190, PL = 34, PR = 10, PT = 10, PB = 22;
+    var iw = W - PL - PR, ih = H - PT - PB;
+    var t0 = opts.t0, t1 = opts.t1, span = Math.max(1, t1 - t0);
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": opts.label || "time series" });
+
+    var yMax = opts.yMax;
+    if (yMax == null) {
+      var m = 0;
+      opts.series.forEach(function (s) { s.pts.forEach(function (p) { if (p.v > m) m = p.v; }); });
+      yMax = niceCeil(m, 1);
+    }
+
+    for (var g = 0; g <= 2; g++) {
+      var gv = yMax * g / 2, gy = PT + ih - (gv / yMax) * ih;
+      svg.appendChild(el("line", { class: g === 0 ? "baseline" : "gridline", x1: PL, x2: W - PR, y1: gy, y2: gy }));
+      var tx = el("text", { class: "tick num", x: PL - 6, y: gy + 3.5, "text-anchor": "end" });
+      tx.textContent = (yMax >= 10 ? Math.round(gv) : gv.toFixed(1));
+      svg.appendChild(tx);
+    }
+
+    var x = function (t) { return PL + (t - t0) / span * iw; };
+    var y = function (v) { return PT + ih - Math.min(1, Math.max(0, v) / yMax) * ih; };
+
+    // Dot size follows how much room each sample gets. Every sample still gets a
+    // mark; at 30 days of 10-minute samples they necessarily read as a textured
+    // band rather than countable dots.
+    var total = opts.series.reduce(function (a, s) { return a + s.pts.length; }, 0);
+    var perPt = iw / Math.max(1, total);
+    var dotR  = perPt >= 9 ? 3 : (perPt >= 5 ? 2.4 : (perPt >= 2.5 ? 1.8 : (perPt >= 1 ? 1.3 : 0.9)));
+    var lineW = perPt >= 1 ? 2 : 1.25;
+    var gapMs = opts.gapMs || Infinity;
+
+    opts.series.forEach(function (s) {
+      if (!s.pts.length) return;
+      // Both the line and the dots are single <path> elements -- 4000+ <circle>
+      // nodes per chart is what makes a dashboard like this feel sluggish. A
+      // zero-length subpath ("h0") with a round linecap renders as a dot.
+      var d = "", dots = "", prev = null;
+      for (var i = 0; i < s.pts.length; i++) {
+        var p = s.pts[i], px = x(p.t).toFixed(1), py = y(p.v).toFixed(1);
+        d += ((prev === null || (p.t - prev) > gapMs) ? "M" : "L") + px + " " + py + " ";
+        dots += "M" + px + " " + py + "h0";
+        prev = p.t;
+      }
+      svg.appendChild(el("path", { d: d.trim(), fill: "none", stroke: s.color, "stroke-width": lineW,
+                                   "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      svg.appendChild(el("path", { d: dots, fill: "none", stroke: s.color, "stroke-width": dotR * 2,
+                                   "stroke-linecap": "round" }));
+    });
+
+    // Selected sample: a solid rule plus a ringed marker, drawn under the hit
+    // layer so it survives a re-render without needing its own hover state.
+    var probe = opts.series.length ? opts.series[0].pts : [];
+    if (opts.picked != null && opts.picked >= t0 && opts.picked <= t1) {
+      var sx = x(opts.picked);
+      svg.appendChild(el("line", { x1: sx, x2: sx, y1: PT, y2: PT + ih,
+                                   stroke: "var(--ink-muted)", "stroke-width": 1 }));
+      opts.series.forEach(function (s) {
+        var sv = s.byT ? s.byT[opts.picked] : undefined;
+        if (sv == null) return;
+        svg.appendChild(el("circle", { cx: sx, cy: y(sv), r: 4.5, fill: s.color,
+                                       stroke: "var(--surface)", "stroke-width": 2 }));
+      });
+    }
+
+    // crosshair + nearest-sample tooltip
+    var cross = el("line", { class: "cross", x1: 0, x2: 0, y1: PT, y2: PT + ih, opacity: 0 });
+    svg.appendChild(cross);
+
+    function nearest(clientX) {
+      if (!probe.length) return null;
+      var r = svg.getBoundingClientRect();
+      var px = (clientX - r.left) / r.width * W;
+      var tAt = t0 + (px - PL) / iw * span;
+      var lo = 0, hi = probe.length - 1;
+      while (lo < hi) { var mid = (lo + hi) >> 1; if (probe[mid].t < tAt) lo = mid + 1; else hi = mid; }
+      if (lo > 0 && Math.abs(probe[lo - 1].t - tAt) < Math.abs(probe[lo].t - tAt)) lo--;
+      return probe[lo];
+    }
+
+    var hit = el("rect", { x: PL, y: PT, width: iw, height: ih, fill: "transparent",
+                           style: opts.onPick ? "cursor:pointer" : null });
+    hit.addEventListener("mousemove", function (ev) {
+      var pt = nearest(ev.clientX);
+      if (!pt) return;
+      cross.setAttribute("x1", x(pt.t)); cross.setAttribute("x2", x(pt.t)); cross.setAttribute("opacity", 1);
+      var html = '<div class="tt">' + esc(fmtDT(pt.t)) + "</div>";
+      opts.series.forEach(function (s) {
+        var q = s.byT ? s.byT[pt.t] : undefined;
+        if (q == null) return;
+        html += '<div class="tr"><span class="swatch" style="background:' + s.color + '"></span><span>' +
+                esc(s.name) + '</span><span class="tv">' + num(q, opts.dp) + (opts.unit || "") + "</span></div>";
+      });
+      if (opts.onPick) {
+        html += '<div class="tr" style="color:var(--ink-muted);margin-top:4px">' +
+                (opts.picked === pt.t ? "Click to clear" : "Click to see processes") + "</div>";
+      }
+      showTip(ev, html);
+    });
+    hit.addEventListener("mouseleave", function () { cross.setAttribute("opacity", 0); hideTip(); });
+    if (opts.onPick) {
+      hit.addEventListener("click", function (ev) {
+        var pt = nearest(ev.clientX);
+        if (pt) opts.onPick(pt.t);
+      });
+    }
+    svg.appendChild(hit);
+
+    // Tick density follows the chart's width, or long date labels collide.
+    var nTicks = opts.ticks || Math.max(2, Math.floor(iw / 90));
+    for (var k = 0; k <= nTicks; k++) {
+      var tt = t0 + span * k / nTicks;
+      var lbl = el("text", { class: "tick", x: x(tt), y: H - 6,
+                             "text-anchor": k === 0 ? "start" : (k === nTicks ? "end" : "middle") });
+      lbl.textContent = opts.fmtTick(tt);
+      svg.appendChild(lbl);
+    }
+
+    host.appendChild(svg);
+  }
+
+  // ---- usage ---------------------------------------------------------------
+  function renderUsage() {
+    var sec = $("#usageSection");
+    if (!perf.length) {
+      sec.querySelectorAll(".card").forEach(function (c) { c.style.display = "none"; });
+      return;
+    }
+    sec.querySelectorAll(".card").forEach(function (c) { c.style.display = ""; });
+
+    var t1 = Date.now();
+    var t0 = t1 - state.rangeH * 3600000;
+    var inr = perf.filter(function (p) { return p.t >= t0; });
+
+    var fmtTick = tickFormatter(state.rangeH);
+
+    // Break the line across a collection gap (machine asleep, collector stopped)
+    // instead of drawing a straight line through hours that were never sampled.
+    var gapMs = 35 * 60000;
+    if (inr.length > 3) {
+      var deltas = [];
+      for (var i = 1; i < inr.length; i++) deltas.push(inr[i].t - inr[i - 1].t);
+      deltas.sort(function (a, b) { return a - b; });
+      gapMs = Math.max(3 * deltas[deltas.length >> 1], 5 * 60000);
+    }
+
+    function mk(field) {
+      var pts = [], byT = {};
+      inr.forEach(function (p) {
+        if (p[field] == null) return;
+        pts.push({ t: p.t, v: p[field] });
+        byT[p.t] = p[field];
+      });
+      return { pts: pts, byT: byT };
+    }
+    var cpu = mk("cpu"), mem = mk("memPct"), dsk = mk("dskPct");
+    var last = inr.length ? inr[inr.length - 1] : null;
+    var count = inr.length.toLocaleString() + " sample" + (inr.length === 1 ? "" : "s");
+
+    // A sample picked by clicking a chart. Dropped automatically if the range
+    // changes to one that no longer contains it.
+    var picked = null;
+    if (state.pickedT != null) {
+      for (var pi = 0; pi < inr.length; pi++) {
+        if (inr[pi].t === state.pickedT) { picked = inr[pi]; break; }
+      }
+      if (!picked) state.pickedT = null;
+    }
+    var shown = picked || last;
+    var whenTxt = picked ? "at " + fmtDT(picked.t) : count;
+
+    function onPick(t) {
+      state.pickedT = (state.pickedT === t) ? null : t;   // clicking the same point clears it
+      renderUsage();
+    }
+
+    lineChart($("#cpuChart"), {
+      t0: t0, t1: t1, fmtTick: fmtTick, gapMs: gapMs, yMax: 100, unit: "%", dp: 1, H: 190,
+      label: "CPU utilisation, every sample",
+      picked: state.pickedT, onPick: onPick,
+      series: [{ name: "CPU", color: "var(--s1)", pts: cpu.pts, byT: cpu.byT }]
+    });
+    $("#cpuNow").innerHTML = shown && shown.cpu != null
+      ? '<span class="now">' + num(shown.cpu) + '<small>% utilisation</small></span>' +
+        '<small style="color:var(--ink-muted)"> · ' + esc(whenTxt) + "</small>"
+      : "No sample in range.";
+
+    lineChart($("#memChart"), {
+      t0: t0, t1: t1, fmtTick: fmtTick, gapMs: gapMs, yMax: 100, unit: "%", dp: 1, H: 190,
+      label: "Memory utilisation, every sample",
+      picked: state.pickedT, onPick: onPick,
+      series: [{ name: "Memory used", color: "var(--s2)", pts: mem.pts, byT: mem.byT }]
+    });
+    $("#memNow").innerHTML = shown && shown.memPct != null
+      ? '<span class="now">' + num(shown.memPct) + '<small>% used</small></span>' +
+        (shown.memMB != null ? ' <small style="color:var(--ink-muted)">' + Math.round(shown.memMB).toLocaleString() +
+          " MB free · " + esc(whenTxt) + "</small>" : "")
+      : "No sample in range.";
+
+    // Disk busy percentage. dskPct only exists from collector 1.7.0 onward, so a
+    // store with older samples in range legitimately has nothing to draw here --
+    // say so rather than showing an empty pane that looks broken.
+    lineChart($("#dskChart"), {
+      t0: t0, t1: t1, fmtTick: fmtTick, gapMs: gapMs, yMax: 100, unit: "%", dp: 1, H: 190,
+      label: "Disk busy, every sample",
+      picked: state.pickedT, onPick: onPick,
+      series: [{ name: "Disk busy", color: "var(--s3)", pts: dsk.pts, byT: dsk.byT }]
+    });
+    $("#dskNow").innerHTML = shown && shown.dskPct != null
+      ? '<span class="now">' + num(shown.dskPct) + '<small>% busy</small></span>' +
+        (shown.dskMs != null ? ' <small style="color:var(--ink-muted)">' + num(shown.dskMs) +
+          " ms/transfer · " + esc(whenTxt) + "</small>"
+                             : '<small style="color:var(--ink-muted)"> · ' + esc(whenTxt) + "</small>")
+      : (dsk.pts.length === 0 && inr.length > 0
+          ? "Not recorded in this range — needs collector 1.7.0 or later."
+          : "No sample in range.");
+
+    renderProcs(shown, !!picked);
+    renderBoot();
+  }
+
+  // ---- process panes -------------------------------------------------------
+  // The collector stores the union of the top-N-by-memory and top-N-by-CPU sets,
+  // so each pane re-ranks the same array by its own metric. A process can lead on
+  // one and be absent from the other's top 10 -- that is the point of two panes.
+  function procPane(cfg) {
+    var host = $(cfg.host);
+    var all = (cfg.rec && cfg.rec.procs) ? cfg.rec.procs.slice() : [];
+    host.innerHTML = "";
+
+    $(cfg.title).textContent = cfg.titleText + (cfg.isPicked ? " at that moment" : "");
+
+    if (!all.length) {
+      $(cfg.hint).textContent = cfg.isPicked ? "That sample recorded no process list." : "No process sample yet.";
+      host.innerHTML = '<div class="empty">Nothing recorded.</div>';
+      return;
+    }
+
+    var ps;
+    if (cfg.metric === "cpu") {
+      ps = all.filter(function (p) { return p.cpu != null; })
+              .sort(function (a, b) { return b.cpu - a.cpu; }).slice(0, 10);
+      if (!ps.length) {
+        $(cfg.hint).textContent = "CPU ranking needs two runs to diff against — no baseline in this sample yet.";
+        host.innerHTML = '<div class="empty">Waiting for a second sample.</div>';
+        return;
+      }
+    } else {
+      ps = all.slice().sort(function (a, b) { return b.ws - a.ws; }).slice(0, 10);
+    }
+
+    $(cfg.hint).innerHTML = cfg.isPicked
+      ? '<b style="color:var(--ink)">' + esc(fmtDT(cfg.rec.t)) + "</b> — the sample you picked. " +
+        (cfg.metric === "cpu" ? "Average over the interval ending then. " : "") +
+        '<button type="button" class="linkbtn" data-clearpick="1">Back to latest</button>'
+      : "Latest sample, " + esc(ago(cfg.rec.t)) + ". " +
+        (cfg.metric === "cpu"
+          ? "Average share of all cores over the interval since the previous run."
+          : "Working set, summed across instances of the same name.") +
+        " Click a point on either chart above to see that moment.";
+
+    Array.prototype.forEach.call(host.parentNode.querySelectorAll("[data-clearpick]"), function (b) {
+      b.addEventListener("click", function () { state.pickedT = null; renderUsage(); });
+    });
+
+    var maxV = cfg.metric === "cpu" ? Math.max.apply(null, ps.map(function (p) { return p.cpu; }))
+                                    : ps[0].ws;
+    if (!(maxV > 0)) maxV = 1;
+
+    var rowH = 26, W = 560, labelW = 122, barX = labelW + 8;
+    var PR = cfg.metric === "cpu" ? 52 : 122;   // "21.5%" needs far less room than "1.3 GB · 7.4%"
+    var barMax = W - barX - PR, H = ps.length * rowH + 6;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.titleText });
+
+    ps.forEach(function (p, i) {
+      var y = i * rowH + 5, bh = 12;
+      var nm = p.n.length > 19 ? p.n.slice(0, 18) + "…" : p.n;
+      var t = el("text", { class: "tick", x: labelW, y: y + bh - 2, "text-anchor": "end" });
+      t.textContent = nm + (p.c > 1 ? " ×" + p.c : "");
+      svg.appendChild(t);
+
+      var v = cfg.metric === "cpu" ? p.cpu : p.ws;
+      var w = Math.max(2, (v / maxV) * barMax);
+      svg.appendChild(el("path", { d: roundedRight(barX, y, w, bh, 4), fill: cfg.color }));
+
+      var vl = el("text", { class: "dlabel", x: barX + w + 7, y: y + bh - 2 });
+      // The CPU pane shows CPU only -- a GB figure beside a percentage reads as if
+      // the bar measured memory. Working set is still in the row's tooltip.
+      vl.textContent = cfg.metric === "cpu"
+        ? p.cpu.toFixed(1) + "%"
+        : fmtMB(p.ws) + (p.cpu != null ? " · " + p.cpu.toFixed(1) + "%" : "");
+      svg.appendChild(vl);
+
+      var hit = el("rect", { x: 0, y: y - 5, width: W, height: rowH, fill: "transparent" });
+      bindTip(hit, '<div class="tt">' + esc(p.n) + "</div>" +
+        '<div class="tr"><span>Working set</span><span class="tv">' + fmtMB(p.ws) + "</span></div>" +
+        '<div class="tr"><span>Instances</span><span class="tv">' + p.c + "</span></div>" +
+        (p.cpu != null ? '<div class="tr"><span>CPU (interval avg)</span><span class="tv">' + p.cpu.toFixed(1) + "%</span></div>" : ""));
+      svg.appendChild(hit);
+    });
+    host.appendChild(svg);
+  }
+
+  function fmtMB(mb) {
+    return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : Math.round(mb) + " MB";
+  }
+
+  function renderProcs(rec, isPicked) {
+    procPane({ host: "#cpuProcChart", title: "#cpuProcTitle", hint: "#cpuProcHint",
+               titleText: "Top 10 processes by CPU", metric: "cpu", color: "var(--s1)",
+               rec: rec, isPicked: isPicked });
+    procPane({ host: "#memProcChart", title: "#memProcTitle", hint: "#memProcHint",
+               titleText: "Top 10 processes by memory", metric: "ws", color: "var(--s2)",
+               rec: rec, isPicked: isPicked });
+  }
+
+  function renderBoot() {
+    var host = $("#bootBody"); host.innerHTML = "";
+    var cut = Date.now() - state.rangeH * 3600000;
+    var inr = boots.filter(function (b) { return b.t >= cut; });
+    var lastBoot = null, lastLogon = null;
+    boots.forEach(function (b) {
+      if (b.kind === "boot") lastBoot = b;
+      if (b.kind === "logon") lastLogon = b;
+    });
+
+    if (!lastBoot && !lastLogon) {
+      $("#bootHint").textContent = "No boot or logon records yet — these only appear after a restart or sign-in.";
+      host.innerHTML = '<div class="empty">Nothing recorded.</div>';
+      return;
+    }
+    $("#bootHint").innerHTML = inr.length + " record(s) in range. From the Diagnostics-Performance log.";
+
+    var dl = document.createElement("dl");
+    dl.className = "kv";
+    function row(k, v) {
+      var dt = document.createElement("dt"); dt.textContent = k;
+      var dd = document.createElement("dd"); dd.textContent = v;
+      dl.appendChild(dt); dl.appendChild(dd);
+    }
+    if (lastBoot) {
+      row("Last boot", fmtDT(lastBoot.t));
+      row("Total boot time", secs(lastBoot.BootTime));
+      if (lastBoot.MainPathBootTime != null) row("— main path", secs(lastBoot.MainPathBootTime));
+      if (lastBoot.BootPostBootTime != null) row("— post boot", secs(lastBoot.BootPostBootTime));
+    }
+    if (lastLogon) {
+      row("Last logon", fmtDT(lastLogon.t));
+      if (lastLogon.LogonTime != null) row("Logon duration", secs(lastLogon.LogonTime));
+      if (lastLogon.UserLogonWaitTime != null) row("— user wait", secs(lastLogon.UserLogonWaitTime));
+      if (lastLogon.UserProfileProcessingTime != null) row("— profile", secs(lastLogon.UserProfileProcessingTime));
+    }
+    host.appendChild(dl);
+
+    var hist = inr.filter(function (b) { return b.kind === "boot" && b.BootTime != null; }).slice(-10);
+    if (hist.length >= 1) {
+      var W = 420, rowH = 20, H = hist.length * rowH + 20;
+      var maxV = Math.max.apply(null, hist.map(function (b) { return b.BootTime; }));
+      var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, class: "natural",
+                            role: "img", "aria-label": "Recent boot durations" });
+      var cap = el("text", { class: "tick", x: 0, y: 10 }); cap.textContent = "Recent boots"; svg.appendChild(cap);
+      hist.forEach(function (b, i) {
+        var y = 18 + i * rowH, bh = 11, labelW = 78, barX = labelW + 8, barMax = W - barX - 64;
+        var t = el("text", { class: "tick", x: labelW, y: y + bh - 2, "text-anchor": "end" });
+        t.textContent = new Date(b.t).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }) + " " +
+                        new Date(b.t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+        svg.appendChild(t);
+        var w = Math.max(2, (b.BootTime / maxV) * barMax);
+        svg.appendChild(el("path", { d: roundedRight(barX, y, w, bh, 4), fill: "var(--s1)" }));
+        var vl = el("text", { class: "dlabel", x: barX + w + 7, y: y + bh - 2 });
+        vl.textContent = secs(b.BootTime); svg.appendChild(vl);
+      });
+      host.appendChild(svg);
+    }
+  }
+
+  // ---- event filtering -----------------------------------------------------
+  function inRange() {
+    var cut = Date.now() - state.rangeH * 3600000;
+    return rows.filter(function (r) {
+      if (r.t < cut) return false;
+      if (state.log !== "all" && r.log !== state.log) return false;
+      return true;
+    });
+  }
+
+  function renderHeader() {
+    var m = EH_META || {};
+    var bits = [];
+    bits.push("<b>" + esc(m.host || "unknown host") + "</b>");
+    if (m.os) bits.push(esc(m.os) + (m.build ? " (" + esc(m.build) + ")" : ""));
+    if (m.cores) bits.push(esc(m.cores) + " cores" + (m.totalMemMB ? " · " + Math.round(m.totalMemMB / 1024) + " GB" : ""));
+    if (m.lastBootUtc) bits.push("up " + dur(Date.now() - Date.parse(m.lastBootUtc)));
+
+    if (m.lastRunUtc) {
+      var age = Date.now() - Date.parse(m.lastRunUtc);
+      var stale = age > 30 * 60000;
+      bits.push('<span class="dot" style="background:' + (stale ? "var(--warn)" : "var(--good)") + '"></span>' +
+                (stale ? "Collector stale &mdash; " : "Collected ") + ago(Date.parse(m.lastRunUtc)));
+    } else {
+      bits.push('<span class="dot" style="background:var(--warn)"></span>No collection recorded yet');
+    }
+    if (m.storeKB != null) bits.push(esc(m.storeKB) + " KB store · " + esc(m.retentionDays || 30) + "d retention");
+    $("#hostline").innerHTML = bits.join(" &nbsp;·&nbsp; ");
+
+    var b = $("#banner");
+    var retention = Number(m.retentionDays) || 30;
+    if (!rows.length && !perf.length) {
+      b.hidden = false;
+      b.innerHTML = "No data loaded. Check that <code>data.js</code>, <code>perf.js</code> and <code>meta.js</code> sit in the same folder as this page, " +
+                    "and that <code>Get-EndpointHealth.ps1</code> has run at least once.";
+    } else if (state.rangeH / 24 > retention) {
+      // Asking for 5 weeks against a 30-day store silently shows 30 days; say so.
+      b.hidden = false;
+      b.innerHTML = "This range is longer than the " + retention + "-day retention window, so it can only show the last " +
+                    retention + " days. Re-run the installer with <code>-RetentionDays " +
+                    Math.ceil(state.rangeH / 24) + "</code> to keep enough history for it.";
+    } else { b.hidden = true; }
+  }
+
+  function renderTiles(data) {
+    var c = { Critical: 0, Error: 0, Diagnostics: 0 }, srcs = {};
+    data.forEach(function (r) { c[r.cls]++; srcs[r.src] = 1; });
+    var label = rangeLabel();
+
+    var defs = [
+      { k: "Critical",    v: c.Critical,    s: "Application + System" },
+      { k: "Error",       v: c.Error,       s: "Application + System" },
+      { k: "Diagnostics", v: c.Diagnostics, s: "Diagnosis-PLA channel" },
+      { k: null,          v: Object.keys(srcs).length, s: "distinct providers", lbl: "Sources" }
+    ];
+    $("#tiles").innerHTML = defs.map(function (d) {
+      return '<div class="tile"><div class="lbl">' + (d.k ? ICONS[d.k] : "") + "<span>" + esc(d.lbl || d.k) + "</span></div>" +
+             '<div class="val">' + d.v.toLocaleString() + "</div>" +
+             '<div class="sub2">' + esc(d.s) + " · " + label + "</div></div>";
+    }).join("");
+  }
+
+  function renderTimeline(data) {
+    var host = $("#timeChart"); host.innerHTML = "";
+    var step = pickStep(state.rangeH);
+    var n = Math.max(2, Math.round(state.rangeH * 60 / step));
+    var edges = makeBuckets(step, n);
+    var fmtTick = tickFormatter(state.rangeH);
+
+    var series = ["Critical", "Error", "Diagnostics"];
+    var buckets = edges.map(function (t) { return { t: t, Critical: 0, Error: 0, Diagnostics: 0, total: 0 }; });
+    data.forEach(function (r) {
+      var i = bucketIndex(edges, r.t);
+      if (i >= 0) { buckets[i][r.cls]++; buckets[i].total++; }
+    });
+
+    $("#timeHint").textContent = "Per " + stepName(step) + ", stacked by severity \u00b7 " + rangeLabel() + ".";
+    $("#timeLegend").innerHTML = series.map(function (s) { return "<span>" + ICONS[s] + esc(s) + "</span>"; }).join("");
+
+    var W = 720, H = 240, PL = 38, PR = 8, PT = 12, PB = 26;
+    var iw = W - PL - PR, ih = H - PT - PB;
+    var max = buckets.reduce(function (m, b) { return Math.max(m, b.total); }, 0);
+    var ceil = Math.max(niceCeil(max, 2), 2);
+
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Event counts over time by severity" });
+    for (var g = 0; g <= 4; g++) {
+      var v = ceil * g / 4, y = PT + ih - (v / ceil) * ih;
+      svg.appendChild(el("line", { class: g === 0 ? "baseline" : "gridline", x1: PL, x2: W - PR, y1: y, y2: y }));
+      var tx = el("text", { class: "tick num", x: PL - 7, y: y + 3.5, "text-anchor": "end" });
+      tx.textContent = Math.round(v).toLocaleString(); svg.appendChild(tx);
+    }
+
+    var bw = iw / n, barW = Math.max(3, Math.min(30, bw - (n > 40 ? 1.5 : 5)));
+    buckets.forEach(function (b, i) {
+      var x = PL + i * bw + (bw - barW) / 2, yCur = PT + ih;
+      series.forEach(function (s) {
+        var val = b[s]; if (!val) return;
+        var h = (val / ceil) * ih;
+        var drawH = Math.max(2, h - 2);   // 2px surface gap between stacked segments
+        yCur -= h;
+        var isTop = (s === "Diagnostics") || series.slice(series.indexOf(s) + 1).every(function (z) { return !b[z]; });
+        svg.appendChild(el("path", { d: roundedTop(x, yCur, barW, drawH, isTop ? 4 : 0), fill: COLORS[s] }));
+      });
+
+      var hit = el("rect", { x: PL + i * bw, y: PT, width: bw, height: ih, fill: "transparent" });
+      var html = '<div class="tt">' + esc(step >= 1440
+                 ? new Date(b.t).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+                 : fmtDT(b.t)) + "</div>";
+      if (!b.total) html += '<div class="tr" style="color:var(--ink-muted)">No events</div>';
+      series.forEach(function (s) {
+        if (!b[s]) return;
+        html += '<div class="tr">' + ICONS[s] + "<span>" + s + '</span><span class="tv">' + b[s] + "</span></div>";
+      });
+      bindTip(hit, html); svg.appendChild(hit);
+
+      if (b.total && b.total >= max * 0.85 && max > 0) {
+        var lab = el("text", { class: "dlabel", x: x + barW / 2, y: PT + ih - (b.total / ceil) * ih - 6, "text-anchor": "middle" });
+        lab.textContent = b.total; svg.appendChild(lab);
+      }
+    });
+
+    var everyN = Math.max(1, Math.ceil(n / (n > 20 ? 10 : 8)));
+    buckets.forEach(function (b, i) {
+      if (i % everyN && i !== n - 1) return;
+      var t = el("text", { class: "tick", x: PL + i * bw + bw / 2, y: H - 8, "text-anchor": "middle" });
+      t.textContent = fmtTick(b.t);
+      svg.appendChild(t);
+    });
+    host.appendChild(svg);
+  }
+
+  function roundedTop(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h);
+    if (!r) return "M" + x + " " + y + "h" + w + "v" + h + "h" + (-w) + "Z";
+    return "M" + x + " " + (y + h) + "V" + (y + r) +
+           "a" + r + " " + r + " 0 0 1 " + r + " " + (-r) + "h" + (w - 2 * r) +
+           "a" + r + " " + r + " 0 0 1 " + r + " " + r + "V" + (y + h) + "Z";
+  }
+  function roundedRight(x, y, w, h, r) {
+    r = Math.min(r, h / 2, w);
+    return "M" + x + " " + y + "h" + (w - r) +
+           "a" + r + " " + r + " 0 0 1 " + r + " " + r + "v" + (h - 2 * r) +
+           "a" + r + " " + r + " 0 0 1 " + (-r) + " " + r + "H" + x + "Z";
+  }
+
+  function renderSources(data) {
+    var host = $("#srcChart"); host.innerHTML = "";
+    var m = {};
+    data.forEach(function (r) { m[r.src] = (m[r.src] || 0) + 1; });
+    var top = Object.keys(m).map(function (k) { return { k: k, v: m[k] }; })
+      .sort(function (a, b) { return b.v - a.v; }).slice(0, 8);
+    if (!top.length) { host.innerHTML = '<div class="empty">Nothing in range.</div>'; return; }
+
+    var rowH = 26, W = 420, PR = 44, H = top.length * rowH + 6;
+    var maxV = top[0].v, labelW = 150, barX = labelW + 8, barMax = W - barX - PR;
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Top event sources" });
+    top.forEach(function (d, i) {
+      var y = i * rowH + 4, bh = 12;
+      var name = d.k.length > 26 ? d.k.slice(0, 25) + "…" : d.k;
+      var t = el("text", { class: "tick", x: labelW, y: y + bh - 2, "text-anchor": "end" });
+      t.textContent = name; svg.appendChild(t);
+      var w = Math.max(2, (d.v / maxV) * barMax);
+      svg.appendChild(el("path", { d: roundedRight(barX, y, w, bh, 4), fill: "var(--info)" }));
+      var vl = el("text", { class: "dlabel", x: barX + w + 7, y: y + bh - 2 });
+      vl.textContent = d.v.toLocaleString(); svg.appendChild(vl);
+      var hit = el("rect", { x: 0, y: y - 4, width: W, height: rowH, fill: "transparent" });
+      bindTip(hit, '<div class="tt">' + esc(d.k) + '</div><div class="tr"><span>Events</span><span class="tv">' + d.v + "</span></div>");
+      svg.appendChild(hit);
+    });
+    host.appendChild(svg);
+  }
+
+  // ---- table ---------------------------------------------------------------
+  var COLS = {
+    grouped: [
+      { k: "cls", t: "Level" }, { k: "log", t: "Log" }, { k: "src", t: "Source" },
+      { k: "id", t: "Event ID", num: true }, { k: "n", t: "Count", num: true },
+      { k: "first", t: "First seen" }, { k: "last", t: "Last seen" }, { k: "msg", t: "Latest message" }
+    ],
+    raw: [
+      { k: "cls", t: "Level" }, { k: "t", t: "Date / time" }, { k: "log", t: "Log" },
+      { k: "src", t: "Source" }, { k: "id", t: "Event ID", num: true }, { k: "msg", t: "Message" }
+    ]
+  };
+
+  function buildRows(data) {
+    if (state.mode === "raw") {
+      return data.map(function (r) { return { cls: r.cls, t: r.t, log: r.log, src: r.src, id: r.id, msg: r.msg }; });
+    }
+    var m = {};
+    data.forEach(function (r) {
+      var k = r.log + "|" + r.cls + "|" + r.src + "|" + r.id;
+      if (!m[k]) m[k] = { cls: r.cls, log: r.log, src: r.src, id: r.id, n: 0, first: r.t, last: r.t, msg: r.msg };
+      var g = m[k];
+      g.n++;
+      if (r.t < g.first) g.first = r.t;
+      if (r.t >= g.last) { g.last = r.t; if (r.msg) g.msg = r.msg; }
+    });
+    return Object.keys(m).map(function (k) { return m[k]; });
+  }
+
+  function renderTable(data) {
+    var cols = COLS[state.mode];
+    var out = buildRows(data);
+    var sk = state.sortKey;
+    if (!cols.some(function (c) { return c.k === sk; })) sk = state.sortKey = (state.mode === "raw" ? "t" : "last");
+    out.sort(function (a, b) {
+      var x = a[sk], y = b[sk];
+      if (typeof x === "string") { x = x.toLowerCase(); y = String(y).toLowerCase(); }
+      return (x < y ? -1 : x > y ? 1 : 0) * state.sortDir;
+    });
+
+    var capped = out.slice(0, 500);
+    $("#tableTitle").textContent = state.mode === "grouped" ? "Distinct events" : "Event log";
+    $("#tableHint").innerHTML = state.mode === "grouped"
+      ? "Identical log + source + event ID collapsed into one row. " + out.length.toLocaleString() + " distinct of " + data.length.toLocaleString() + " events in range."
+      : out.length.toLocaleString() + " events in range" + (out.length > 500 ? ", showing the first 500 &mdash; switch to Grouped or narrow the range." : ".");
+
+    $("#thead").innerHTML = cols.map(function (c) {
+      var arrow = c.k === sk ? (state.sortDir > 0 ? " ↑" : " ↓") : "";
+      return '<th class="' + (c.num ? "num" : "") + '" data-k="' + c.k + '">' + esc(c.t) + arrow + "</th>";
+    }).join("");
+
+    if (!capped.length) {
+      $("#tbody").innerHTML = '<tr><td class="empty" colspan="' + cols.length + '">No events match these filters.</td></tr>';
+      return;
+    }
+    $("#tbody").innerHTML = capped.map(function (r) {
+      return "<tr>" + cols.map(function (c) {
+        var v = r[c.k];
+        if (c.k === "cls") return '<td><span class="pill">' + ICONS[v] + esc(v) + "</span></td>";
+        if (c.k === "t" || c.k === "first" || c.k === "last") return '<td class="ts">' + (v ? fmtDT(v) : "") + "</td>";
+        if (c.k === "log") return "<td>" + esc(v === "PLA" ? "Diagnosis-PLA" : v) + "</td>";
+        if (c.k === "msg") return '<td class="msg">' + esc(v || "—") + "</td>";
+        if (c.k === "id")  return '<td class="num">' + esc(v == null ? "" : v) + "</td>";   // identifiers, not quantities
+        if (c.num) return '<td class="num">' + (v == null ? "" : Number(v).toLocaleString()) + "</td>";
+        return "<td>" + esc(v == null ? "" : v) + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+  }
+
+  // ---- wiring --------------------------------------------------------------
+  function render() {
+    var data = inRange();
+    renderHeader();
+    renderUsage();
+    renderTiles(data);
+    renderTimeline(data);
+    renderSources(data);
+    renderTable(data);
+  }
+
+  function seg(id, key, cast) {
+    var box = $(id);
+    box.addEventListener("click", function (ev) {
+      var b = ev.target.closest("button[data-v]"); if (!b) return;
+      Array.prototype.forEach.call(box.querySelectorAll("button"), function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      state[key] = cast ? cast(b.dataset.v) : b.dataset.v;
+      render();
+    });
+  }
+  // Range is a <select>, not a segmented control, and the choice is remembered --
+  // with 15 options, re-picking on every reload gets old fast.
+  var selRange = $("#selRange");
+  try {
+    var savedRange = localStorage.getItem("eh-range");
+    if (savedRange && selRange.querySelector('option[value="' + savedRange + '"]')) {
+      selRange.value = savedRange;
+    }
+  } catch (e) {}
+  state.rangeH = Number(selRange.value) || 24;
+  selRange.addEventListener("change", function () {
+    state.rangeH = Number(selRange.value) || 24;
+    try { localStorage.setItem("eh-range", String(state.rangeH)); } catch (e) {}
+    render();
+  });
+  seg("#segLog", "log");
+  seg("#segMode", "mode");
+
+  $("#thead").addEventListener("click", function (ev) {
+    var th = ev.target.closest("th[data-k]"); if (!th) return;
+    var k = th.dataset.k;
+    if (state.sortKey === k) state.sortDir *= -1;
+    else { state.sortKey = k; state.sortDir = (k === "n" || k === "t" || k === "first" || k === "last") ? -1 : 1; }
+    renderTable(inRange());
+  });
+
+  $("#reloadBtn").addEventListener("click", function () { location.reload(); });
+
+  var themeBtn = $("#themeBtn");
+  function isDark() {
+    var t = document.documentElement.getAttribute("data-theme");
+    return t === "dark" || (!t && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+  function syncThemeBtn() { themeBtn.textContent = isDark() ? "Light mode" : "Dark mode"; }
+  themeBtn.addEventListener("click", function () {
+    var next = isDark() ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("eh-theme", next); } catch (e) {}
+    syncThemeBtn();
+  });
+  try { var saved = localStorage.getItem("eh-theme"); if (saved) document.documentElement.setAttribute("data-theme", saved); } catch (e) {}
+  syncThemeBtn();
+
+  render();
+  setTimeout(function () { location.reload(); }, 5 * 60 * 1000);
+})();
+</script>
+</body>
+</html>
