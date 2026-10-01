@@ -22,6 +22,7 @@
     --s1:           #2a78d6;
     --s2:           #eb6834;
     --s3:           #1baf7a;
+    --s4:           #7c5cd6;
     --good:         #0ca30c;
     --warn:         #fab219;
     --chip:         rgba(11,11,11,0.04);
@@ -34,7 +35,7 @@
       --ink-muted: #898781; --grid: #2c2c2a; --axis: #383835;
       --border: rgba(255,255,255,0.10); --shadow: none;
       --crit: #d03b3b; --err: #ec835a; --info: #3987e5;
-      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #fab219;
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #8f72e6; --good: #0ca30c; --warn: #fab219;
       --chip: rgba(255,255,255,0.06); --chip-on: rgba(255,255,255,0.14);
     }
   }
@@ -44,7 +45,7 @@
     --ink-muted: #898781; --grid: #2c2c2a; --axis: #383835;
     --border: rgba(255,255,255,0.10); --shadow: none;
     --crit: #d03b3b; --err: #ec835a; --info: #3987e5;
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --good: #0ca30c; --warn: #fab219;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #8f72e6; --good: #0ca30c; --warn: #fab219;
     --chip: rgba(255,255,255,0.06); --chip-on: rgba(255,255,255,0.14);
   }
 
@@ -84,6 +85,12 @@
   }
   .sel:hover { background: var(--chip-on); }
   .sel:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+  /* The popup list doesn't pick up the translucent chip, so options need an opaque
+     surface of their own or they render dark-on-dark in dark mode. */
+  .sel option { background: var(--surface); color: var(--ink); }
+  /* Group headings (Hours, Days...) are styled separately from their options and
+     otherwise keep the browser's black text. */
+  .sel optgroup { background: var(--surface); color: var(--ink-2); font-style: normal; }
   .linkbtn {
     font: inherit; font-size: 12px; color: var(--s1); background: none; border: 0;
     padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
@@ -111,10 +118,11 @@
   .grid2  { display: grid; grid-template-columns: 1.55fr 1fr; gap: 16px; }
   .grid2e { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .grid3  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid4  { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
   .bootgrid { display: grid; grid-template-columns: minmax(230px, 320px) 1fr; gap: 12px 40px; align-items: start; }
   @media (max-width: 720px) { .bootgrid { grid-template-columns: 1fr; } }
-  @media (max-width: 1180px) { .grid3 { grid-template-columns: 1fr 1fr; } }
-  @media (max-width: 860px)  { .grid2, .grid2e, .grid3 { grid-template-columns: 1fr; } }
+  @media (max-width: 1180px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 860px)  { .grid2, .grid2e, .grid3, .grid4 { grid-template-columns: 1fr; } }
 
   .now { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
   .now small { font-size: 12px; font-weight: 400; color: var(--ink-muted); margin-left: 3px; }
@@ -234,7 +242,7 @@
   <!-- ============ RESOURCE USAGE ============ -->
   <div id="usageSection">
     <div class="sechead">Resource usage</div>
-    <div class="grid3" style="margin-bottom:16px">
+    <div class="grid4" style="margin-bottom:16px">
       <section class="card">
         <h2>CPU</h2>
         <p class="hint" id="cpuNow">&nbsp;</p>
@@ -250,9 +258,14 @@
         <p class="hint" id="dskNow">&nbsp;</p>
         <div id="dskChart"></div>
       </section>
+      <section class="card">
+        <h2>GPU</h2>
+        <p class="hint" id="gpuNow">&nbsp;</p>
+        <div id="gpuChart"></div>
+      </section>
     </div>
 
-    <div class="grid3" style="margin-bottom:16px">
+    <div class="grid4" style="margin-bottom:16px">
       <section class="card">
         <h2 id="cpuProcTitle">Top 10 processes by CPU</h2>
         <p class="hint" id="cpuProcHint">&nbsp;</p>
@@ -268,7 +281,15 @@
         <p class="hint" id="ioProcHint">&nbsp;</p>
         <div id="ioProcChart"></div>
       </section>
+      <section class="card">
+        <h2 id="gpuProcTitle">Top 10 processes by GPU</h2>
+        <p class="hint" id="gpuProcHint">&nbsp;</p>
+        <div id="gpuProcChart"></div>
+      </section>
     </div>
+
+    <!-- One block per name in the collector's -WatchProcess (default: claude). -->
+    <div id="watchSection"></div>
 
     <section class="card" style="margin-bottom:16px">
       <h2>Boot and logon</h2>
@@ -342,11 +363,17 @@
   }).filter(function (r) { return !isNaN(r.t); });
   rows.sort(function (a, b) { return a.t - b.t; });
 
-  var perf = [], boots = [];
+  var perf = [], boots = [], bootByKey = {};
   (EHP || []).forEach(function (p) {
     var t = Date.parse(p.t);
     if (isNaN(t)) return;
-    if (p.k === "b") { boots.push(Object.assign({}, p, { t: t })); }
+    if (p.k === "b") {
+      // The collector's one-time history backfill re-reads boots it already
+      // recorded (to pick up the logon fields), so merge by time + event id.
+      var key = t + "|" + p.id;
+      if (bootByKey[key]) Object.assign(bootByKey[key], p, { t: t });
+      else { bootByKey[key] = Object.assign({}, p, { t: t }); boots.push(bootByKey[key]); }
+    }
     else { perf.push(Object.assign({}, p, { t: t })); }
   });
   perf.sort(function (a, b) { return a.t - b.t; });
@@ -491,6 +518,7 @@
     if (yMax == null) {
       var m = 0;
       opts.series.forEach(function (s) { s.pts.forEach(function (p) { if (p.v > m) m = p.v; }); });
+      if (opts.ref && opts.ref.v > m) m = opts.ref.v;
       yMax = niceCeil(m, 1);
     }
 
@@ -534,6 +562,26 @@
 
     // Selected sample: a solid rule plus a ringed marker, drawn under the hit
     // layer so it survives a re-render without needing its own hover state.
+    // Optional shaded bands (opts.bands = [{ t0, t1 }]) under the data, e.g. to group
+    // points that belong together. Inserted first so lines and dots sit on top.
+    (opts.bands || []).forEach(function (bd) {
+      var bx0 = x(bd.t0), bx1 = x(bd.t1);
+      svg.insertBefore(el("rect", { x: bx0, y: PT, width: Math.max(2, bx1 - bx0), height: ih,
+                                    fill: "var(--chip)", rx: 4 }), svg.querySelector("path"));
+    });
+
+    // Optional reference line (opts.ref = { v, label }), e.g. a historical average:
+    // dashed, drawn under the data so it never hides a point. Labelled at the LEFT
+    // end: the newest point -- the one people look at -- sits at the right.
+    if (opts.ref && opts.ref.v != null) {
+      var ry = y(opts.ref.v);
+      svg.insertBefore(el("line", { x1: PL, x2: W - PR, y1: ry, y2: ry, stroke: "var(--ink-muted)",
+                                    "stroke-width": 1, "stroke-dasharray": "4 4" }), svg.querySelector("path"));
+      var rl = el("text", { class: "tick", x: PL + 4, y: ry - 5, "text-anchor": "start" });
+      rl.textContent = opts.ref.label;
+      svg.appendChild(rl);
+    }
+
     var probe = opts.series.length ? opts.series[0].pts : [];
     if (opts.picked != null && opts.picked >= t0 && opts.picked <= t1) {
       var sx = x(opts.picked);
@@ -568,12 +616,13 @@
       var pt = nearest(ev.clientX);
       if (!pt) return;
       cross.setAttribute("x1", x(pt.t)); cross.setAttribute("x2", x(pt.t)); cross.setAttribute("opacity", 1);
-      var html = '<div class="tt">' + esc(fmtDT(pt.t)) + "</div>";
+      var html = '<div class="tt">' + esc(opts.fmtHead ? opts.fmtHead(pt.t) : fmtDT(pt.t)) + "</div>";
       opts.series.forEach(function (s) {
         var q = s.byT ? s.byT[pt.t] : undefined;
         if (q == null) return;
         html += '<div class="tr"><span class="swatch" style="background:' + s.color + '"></span><span>' +
                 esc(s.name) + '</span><span class="tv">' + num(q, opts.dp) + (opts.unit || "") + "</span></div>";
+        if (s.detail) html += s.detail(pt.t);   // optional extra rows for this point
       });
       if (opts.onPick) {
         html += '<div class="tr" style="color:var(--ink-muted);margin-top:4px">' +
@@ -590,14 +639,28 @@
     }
     svg.appendChild(hit);
 
-    // Tick density follows the chart's width, or long date labels collide.
-    var nTicks = opts.ticks || Math.max(2, Math.floor(iw / 90));
-    for (var k = 0; k <= nTicks; k++) {
-      var tt = t0 + span * k / nTicks;
-      var lbl = el("text", { class: "tick", x: x(tt), y: H - 6,
-                             "text-anchor": k === 0 ? "start" : (k === nTicks ? "end" : "middle") });
-      lbl.textContent = opts.fmtTick(tt);
-      svg.appendChild(lbl);
+    // Explicit ticks (opts.tickAt = [{ t, label }]) for a non-time x axis, thinned
+    // so labels keep ~70px apart; otherwise evenly spaced, density following width.
+    if (opts.tickAt) {
+      var lastX = -Infinity;
+      opts.tickAt.forEach(function (tk) {
+        var tx = x(tk.t);
+        if (tx - lastX < 70) return;
+        lastX = tx;
+        var lb = el("text", { class: "tick", x: tx, y: H - 6, "text-anchor": "middle" });
+        lb.textContent = tk.label;
+        svg.appendChild(lb);
+      });
+    } else {
+      // Tick density follows the chart's width, or long date labels collide.
+      var nTicks = opts.ticks || Math.max(2, Math.floor(iw / 90));
+      for (var k = 0; k <= nTicks; k++) {
+        var tt = t0 + span * k / nTicks;
+        var lbl = el("text", { class: "tick", x: x(tt), y: H - 6,
+                               "text-anchor": k === 0 ? "start" : (k === nTicks ? "end" : "middle") });
+        lbl.textContent = opts.fmtTick(tt);
+        svg.appendChild(lbl);
+      }
     }
 
     host.appendChild(svg);
@@ -637,7 +700,7 @@
       });
       return { pts: pts, byT: byT };
     }
-    var cpu = mk("cpu"), mem = mk("memPct"), dsk = mk("dskPct");
+    var cpu = mk("cpu"), mem = mk("memPct"), dsk = mk("dskPct"), gpu = mk("gpu");
     var last = inr.length ? inr[inr.length - 1] : null;
     var count = inr.length.toLocaleString() + " sample" + (inr.length === 1 ? "" : "s");
 
@@ -699,15 +762,47 @@
           ? "Not recorded in this range — needs collector 1.7.0 or later."
           : "No sample in range.");
 
+    // GPU: the busiest engine across all adapters, as Task Manager reports it.
+    // Absent before collector 1.9.0, and absent for good on machines without GPU
+    // counters (most VMs), so the empty-state text covers both.
+    lineChart($("#gpuChart"), {
+      t0: t0, t1: t1, fmtTick: fmtTick, gapMs: gapMs, yMax: 100, unit: "%", dp: 1, H: 190,
+      label: "GPU utilisation (busiest engine), every sample",
+      picked: state.pickedT, onPick: onPick,
+      series: [{ name: "GPU", color: "var(--s4)", pts: gpu.pts, byT: gpu.byT }]
+    });
+    var ENG = { "3D": "3D", "VideoDecode": "video decode", "VideoEncode": "video encode",
+                "Copy": "copy", "Compute": "compute" };
+    function engName(e) {
+      if (!e) return "";
+      for (var k in ENG) if (e.toLowerCase().indexOf(k.toLowerCase()) === 0) return ENG[k];
+      return e;
+    }
+    if (shown && shown.gpu != null) {
+      var gBits = [];
+      if (shown.gpuEng) gBits.push(esc(engName(shown.gpuEng)));
+      if (shown.gpuMemMB != null) gBits.push(fmtMB(shown.gpuMemMB) + " dedicated");
+      if (shown.gpuShMB != null) gBits.push(fmtMB(shown.gpuShMB) + " shared");
+      gBits.push(esc(whenTxt));
+      $("#gpuNow").innerHTML = '<span class="now">' + num(shown.gpu) + '<small>% busy</small></span>' +
+        ' <small style="color:var(--ink-muted)">' + gBits.join(" · ") + "</small>";
+    } else {
+      $("#gpuNow").textContent = gpu.pts.length === 0 && inr.length > 0
+        ? "Not recorded in this range — needs collector 1.9.0 or later and a GPU with WDDM counters."
+        : "No sample in range.";
+    }
+
     renderProcs(shown, !!picked);
+    renderWatch({ inr: inr, shown: shown, picked: picked, whenTxt: whenTxt, t0: t0, t1: t1,
+                  fmtTick: fmtTick, gapMs: gapMs, onPick: onPick });
     renderBoot();
   }
 
   // ---- process panes -------------------------------------------------------
-  // The collector stores the union of the top-N-by-memory, top-N-by-CPU and
-  // top-N-by-I/O sets, so each pane re-ranks the same array by its own metric. A
+  // The collector stores the union of the top-N-by-memory, top-N-by-CPU,
+  // top-N-by-I/O and top-N-by-GPU sets, so each pane re-ranks the same array by its own metric. A
   // process can lead on one and be absent from another's top 10 -- that is the
-  // point of three panes. A process outside all three unions is simply not in the
+  // point of four panes. A process outside all four sets is simply not in the
   // array, which is why a pane can show fewer than 10 rows.
   function procPane(cfg) {
     var host = $(cfg.host);
@@ -723,7 +818,21 @@
     }
 
     var ps;
-    if (cfg.metric === "cpu" || cfg.metric === "io") {
+    if (cfg.metric === "gpu") {
+      // Point-in-time, no baseline needed. null means the collector had no GPU
+      // counters (pre-1.9.0, or a VM); 0 means nothing was drawing on the GPU,
+      // which is the normal state of an office machine and not worth ten 0% bars.
+      var hasGpu = all.some(function (p) { return p.gpu != null; });
+      ps = all.filter(function (p) { return p.gpu > 0; })
+              .sort(function (a, b) { return b.gpu - a.gpu; }).slice(0, 10);
+      if (!ps.length) {
+        $(cfg.hint).textContent = hasGpu
+          ? "No process was using the GPU in this sample."
+          : "Not recorded — needs collector 1.9.0 or later and a GPU with WDDM counters.";
+        host.innerHTML = '<div class="empty">' + (hasGpu ? "GPU idle." : "Nothing recorded.") + "</div>";
+        return;
+      }
+    } else if (cfg.metric === "cpu" || cfg.metric === "io") {
       // Both are interval rates diffed against the previous run, so both are null
       // until a baseline exists. Distinguish "no baseline yet" from "the counter
       // isn't available on this machine" -- they need different answers.
@@ -745,11 +854,12 @@
       cpu: "Average share of all cores over the interval since the previous run.",
       ws:  "Working set, summed across instances of the same name.",
       io:  "Read + write throughput averaged over the interval. Counts all file-handle " +
-           "I/O, including cache hits — disk demand, not confirmed platter traffic."
+           "I/O, including cache hits — disk demand, not confirmed platter traffic.",
+      gpu: "Busiest GPU engine each process used, read over one second at sample time."
     };
     $(cfg.hint).innerHTML = cfg.isPicked
       ? '<b style="color:var(--ink)">' + esc(fmtDT(cfg.rec.t)) + "</b> — the sample you picked. " +
-        (cfg.metric === "ws" ? "" : "Average over the interval ending then. ") +
+        (cfg.metric === "ws" || cfg.metric === "gpu" ? "" : "Average over the interval ending then. ") +
         '<button type="button" class="linkbtn" data-clearpick="1">Back to latest</button>'
       : "Latest sample, " + esc(ago(cfg.rec.t)) + ". " + BLURB[cfg.metric] +
         " Click a point on any chart above to see that moment.";
@@ -764,7 +874,7 @@
 
     var rowH = 26, W = 560, labelW = 122, barX = labelW + 8;
     // Room for the value label: "21.5%" needs far less than "1.3 GB · 7.4%".
-    var PR = cfg.metric === "cpu" ? 52 : (cfg.metric === "io" ? 74 : 122);
+    var PR = (cfg.metric === "cpu" || cfg.metric === "gpu") ? 52 : (cfg.metric === "io" ? 74 : 122);
     var barMax = W - barX - PR, H = ps.length * rowH + 6;
     var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.titleText });
 
@@ -783,6 +893,7 @@
       // Each pane labels its own metric only. A GB figure beside a percentage
       // reads as if the bar measured memory; the other figures are in the tooltip.
       vl.textContent = cfg.metric === "cpu" ? p.cpu.toFixed(1) + "%"
+                     : cfg.metric === "gpu" ? p.gpu.toFixed(1) + "%"
                      : cfg.metric === "io"  ? fmtKBs(p.io)
                      : fmtMB(p.ws) + (p.cpu != null ? " · " + p.cpu.toFixed(1) + "%" : "");
       svg.appendChild(vl);
@@ -792,7 +903,8 @@
         '<div class="tr"><span>Working set</span><span class="tv">' + fmtMB(p.ws) + "</span></div>" +
         '<div class="tr"><span>Instances</span><span class="tv">' + p.c + "</span></div>" +
         (p.cpu != null ? '<div class="tr"><span>CPU (interval avg)</span><span class="tv">' + p.cpu.toFixed(1) + "%</span></div>" : "") +
-        (p.io  != null ? '<div class="tr"><span>Disk I/O (interval avg)</span><span class="tv">' + fmtKBs(p.io) + "</span></div>" : ""));
+        (p.io  != null ? '<div class="tr"><span>Disk I/O (interval avg)</span><span class="tv">' + fmtKBs(p.io) + "</span></div>" : "") +
+        (p.gpu != null ? '<div class="tr"><span>GPU (at sample)</span><span class="tv">' + p.gpu.toFixed(1) + "%</span></div>" : ""));
       svg.appendChild(hit);
     });
     host.appendChild(svg);
@@ -811,6 +923,92 @@
     return kbs.toFixed(1) + " KB/s";
   }
 
+  // ---- watched processes ----------------------------------------------------
+  // The collector's -WatchProcess list (default claude) is recorded instance by
+  // instance under rec.watch[name] = { n, cpu, ws, pv, io, gpu, p: [{pid, r, cpu,
+  // ws, pv, io, gpu}] }. Each name gets four total-over-time charts matching the
+  // machine-wide row. Charts share the page's click-to-pick, so their headline
+  // figures rewind to a picked sample like the rest of the page.
+
+  function renderWatch(o) {
+    var host = $("#watchSection");
+    host.innerHTML = "";
+    var names = [];
+    perf.forEach(function (p) {
+      if (p.watch) for (var k in p.watch) if (names.indexOf(k) === -1) names.push(k);
+    });
+    if (!names.length) {
+      // Say why rather than leaving the section silently absent -- the usual cause
+      // is a new dashboard.html deployed beside an older collector.
+      var ver = (EH_META && EH_META.version) || "unknown";
+      host.innerHTML =
+        '<div class="sechead">claude.exe — all processes</div>' +
+        '<div class="banner" style="margin-bottom:16px">No per-process data recorded yet. ' +
+        "This needs collector <b>1.10.0</b> or later; the one that wrote this data is <b>" + esc(ver) + "</b>. " +
+        "Re-run <code>Install-EndpointHealthTask.ps1</code> from an elevated prompt in the folder with the new " +
+        "<code>Get-EndpointHealth.ps1</code>, then give it a minute. (If the collector is current, check that " +
+        "<code>-WatchProcess</code> wasn't set to <code>@()</code>.)</div>";
+      return;
+    }
+    names.forEach(function (name, ix) { watchBlock(host, name, ix, o); });
+  }
+
+  function watchBlock(host, name, ix, o) {
+    var id = "w" + ix + "_";
+    var wrap = document.createElement("div");
+    wrap.innerHTML =
+      '<div class="sechead">' + esc(name) + ".exe — all processes</div>" +
+      '<div class="grid4" style="margin-bottom:16px">' +
+        ["cpu", "mem", "io", "gpu"].map(function (m) {
+          var t = { cpu: "CPU", mem: "Memory (private)", io: "Disk I/O", gpu: "GPU" }[m];
+          return '<section class="card"><h2>' + esc(name) + " " + t + '</h2><p class="hint" id="' + id + m +
+                 'Now">&nbsp;</p><div id="' + id + m + 'Chart"></div></section>';
+        }).join("") +
+      "</div>";
+    host.appendChild(wrap);
+
+    function series(field) {
+      var pts = [], byT = {};
+      o.inr.forEach(function (p) {
+        var w = p.watch && p.watch[name];
+        if (!w || w[field] == null) return;
+        pts.push({ t: p.t, v: w[field] }); byT[p.t] = w[field];
+      });
+      return { pts: pts, byT: byT };
+    }
+    var cur = o.shown && o.shown.watch ? o.shown.watch[name] : null;
+    var muted = function (s) { return ' <small style="color:var(--ink-muted)">' + s + "</small>"; };
+    var count = cur ? cur.n + " process" + (cur.n === 1 ? "" : "es") + (o.picked ? " · " + esc(o.whenTxt) : "") : "";
+
+    var defs = [
+      { m: "cpu", field: "cpu", color: "var(--s1)", unit: "%",     dp: 2,
+        now: function (w) { return w.cpu == null ? null : '<span class="now">' + num(w.cpu, 2) + "<small>% of all cores</small></span>"; },
+        wait: "CPU needs two runs to diff against." },
+      { m: "mem", field: "pv",  color: "var(--s2)", unit: " MB",   dp: 0,
+        now: function (w) { return '<span class="now">' + fmtMB(w.pv) + "<small> private</small></span>" + muted(fmtMB(w.ws) + " working set"); } },
+      { m: "io",  field: "io",  color: "var(--s3)", unit: " KB/s", dp: 1,
+        now: function (w) { return w.io == null ? null : '<span class="now">' + fmtKBs(w.io) + "</span>"; },
+        wait: "Disk I/O needs two runs to diff against." },
+      { m: "gpu", field: "gpu", color: "var(--s4)", unit: "%",     dp: 1,
+        now: function (w) { return w.gpu == null ? null : '<span class="now">' + num(w.gpu, 1) + "<small>% busy</small></span>"; },
+        wait: "No GPU counters on this machine." }
+    ];
+    defs.forEach(function (d) {
+      var s = series(d.field);
+      lineChart($("#" + id + d.m + "Chart"), {
+        t0: o.t0, t1: o.t1, fmtTick: o.fmtTick, gapMs: o.gapMs, unit: d.unit, dp: d.dp, H: 190,
+        label: name + " " + d.m + ", all processes combined",
+        picked: state.pickedT, onPick: o.onPick,
+        series: [{ name: name + " (all)", color: d.color, pts: s.pts, byT: s.byT }]
+      });
+      var hd = cur ? d.now(cur) : null;
+      $("#" + id + d.m + "Now").innerHTML = hd
+        ? hd + muted(count)
+        : (cur ? esc(d.wait || "No sample in range.")
+               : (s.pts.length ? "Not recorded in this sample." : "Not recorded in this range — needs collector 1.10.0 or later."));
+    });
+  }
+
   function renderProcs(rec, isPicked) {
     procPane({ host: "#cpuProcChart", title: "#cpuProcTitle", hint: "#cpuProcHint",
                titleText: "Top 10 processes by CPU", metric: "cpu", color: "var(--s1)",
@@ -821,66 +1019,128 @@
     procPane({ host: "#ioProcChart", title: "#ioProcTitle", hint: "#ioProcHint",
                titleText: "Top 10 processes by disk activity", metric: "io", color: "var(--s3)",
                rec: rec, isPicked: isPicked });
+    procPane({ host: "#gpuProcChart", title: "#gpuProcTitle", hint: "#gpuProcHint",
+               titleText: "Top 10 processes by GPU", metric: "gpu", color: "var(--s4)",
+               rec: rec, isPicked: isPicked });
   }
+
+  // ---- boot and logon ------------------------------------------------------
+  // A trend, not a table: total boot time for every boot on record, against a
+  // dashed historical-average line, so "are boots getting slower?" is answered at
+  // a glance. The collector keeps a year of boots (independent of the range
+  // picker) and backfills it from Windows' own log on first run. The detail --
+  // main path, post boot, profile load, Explorer start, logon wait -- is one
+  // hover away on each point rather than on the face of the card.
+  function avgOf(list, k) {
+    var v = list.filter(function (b) { return b[k] != null; }).map(function (b) { return b[k]; });
+    if (!v.length) return null;
+    return { mean: v.reduce(function (a, x) { return a + x; }, 0) / v.length, n: v.length };
+  }
+
+  // +12% slower / -8% faster than average. Within ±10% is ordinary variation and
+  // stays muted; beyond it, red for slower and green for faster.
+  function vsAvg(v, avg) {
+    if (v == null || !avg || avg.n < 2 || !(avg.mean > 0)) return "";
+    var pct = (v - avg.mean) / avg.mean * 100;
+    var col = pct > 10 ? "var(--crit)" : (pct < -10 ? "var(--good)" : "var(--ink-muted)");
+    return ' <small style="color:' + col + ';font-weight:600">' + (pct >= 0 ? "+" : "−") +
+           Math.abs(pct).toFixed(0) + "% vs avg</small>";
+  }
+
+  var BOOT_DETAIL = [
+    { k: "MainPathBootTime",              label: "Main path" },
+    { k: "BootPostBootTime",              label: "Post boot" },
+    { k: "BootUserProfileProcessingTime", label: "Profile load" },
+    { k: "BootExplorerInitTime",          label: "Explorer start" },
+    { k: "UserLogonWaitDuration",         label: "Logon wait" }
+  ];
 
   function renderBoot() {
     var host = $("#bootBody"); host.innerHTML = "";
-    var cut = Date.now() - state.rangeH * 3600000;
-    var inr = boots.filter(function (b) { return b.t >= cut; });
-    var lastBoot = null, lastLogon = null;
-    boots.forEach(function (b) {
-      if (b.kind === "boot") lastBoot = b;
-      if (b.kind === "logon") lastLogon = b;
-    });
+    var all = boots.filter(function (b) { return b.kind === "boot" && b.BootTime != null; });
+    var shut = boots.filter(function (b) { return b.kind === "shutdown" && b.ShutdownTime != null; });
 
-    if (!lastBoot && !lastLogon) {
-      $("#bootHint").textContent = "No boot or logon records yet — these only appear after a restart or sign-in.";
+    if (!all.length) {
+      $("#bootHint").textContent = "No boot records yet — these only appear after a restart.";
       host.innerHTML = '<div class="empty">Nothing recorded.</div>';
       return;
     }
-    $("#bootHint").innerHTML = inr.length + " record(s) in range. From the Diagnostics-Performance log.";
 
+    var avg = avgOf(all, "BootTime");
+    $("#bootHint").textContent = all.length + " boot" + (all.length === 1 ? "" : "s") + " on record since " +
+      new Date(all[0].t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
+      ". One point per boot; shaded groups are several boots on the same day. Hover a point for the breakdown. Not filtered by the range above.";
+
+    // Left: the latest boot in words.
     var dl = document.createElement("dl");
     dl.className = "kv";
-    function row(k, v) {
+    function row(k, vHtml) {
       var dt = document.createElement("dt"); dt.textContent = k;
-      var dd = document.createElement("dd"); dd.textContent = v;
+      var dd = document.createElement("dd"); dd.innerHTML = vHtml;
       dl.appendChild(dt); dl.appendChild(dd);
     }
-    if (lastBoot) {
-      row("Last boot", fmtDT(lastBoot.t));
-      row("Total boot time", secs(lastBoot.BootTime));
-      if (lastBoot.MainPathBootTime != null) row("— main path", secs(lastBoot.MainPathBootTime));
-      if (lastBoot.BootPostBootTime != null) row("— post boot", secs(lastBoot.BootPostBootTime));
+    var lb = all[all.length - 1];
+    row("Last boot", esc(fmtDT(lb.t)));
+    row("Boot time", esc(secs(lb.BootTime)) + vsAvg(lb.BootTime, avg));
+    if (avg && avg.n >= 2) row("Average", esc(secs(Math.round(avg.mean))));
+    // Several boots in one day is a signal in itself -- updates, crashes or
+    // someone troubleshooting -- so name the worst day.
+    var cnt = {}, worst = null;
+    all.forEach(function (b) {
+      var d = new Date(b.t).toDateString();
+      cnt[d] = (cnt[d] || 0) + 1;
+      if (!worst || cnt[d] > cnt[worst.d]) worst = { d: d, t: b.t };
+    });
+    var multi = Object.keys(cnt).filter(function (d) { return cnt[d] > 1; }).length;
+    if (worst && cnt[worst.d] > 1) {
+      row("Most in one day", cnt[worst.d] + " · " +
+          esc(new Date(worst.t).toLocaleDateString(undefined, { month: "short", day: "numeric" })));
+      row("Days with 2+ boots", String(multi));
     }
-    if (lastLogon) {
-      row("Last logon", fmtDT(lastLogon.t));
-      if (lastLogon.LogonTime != null) row("Logon duration", secs(lastLogon.LogonTime));
-      if (lastLogon.UserLogonWaitTime != null) row("— user wait", secs(lastLogon.UserLogonWaitTime));
-      if (lastLogon.UserProfileProcessingTime != null) row("— profile", secs(lastLogon.UserProfileProcessingTime));
+    if (shut.length) {
+      var ls = shut[shut.length - 1];
+      row("Last shutdown", esc(secs(ls.ShutdownTime)) + vsAvg(ls.ShutdownTime, avgOf(shut, "ShutdownTime")));
     }
     host.appendChild(dl);
 
-    var hist = inr.filter(function (b) { return b.kind === "boot" && b.BootTime != null; }).slice(-10);
-    if (hist.length >= 1) {
-      var W = 420, rowH = 20, H = hist.length * rowH + 20;
-      var maxV = Math.max.apply(null, hist.map(function (b) { return b.BootTime; }));
-      var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, class: "natural",
-                            role: "img", "aria-label": "Recent boot durations" });
-      var cap = el("text", { class: "tick", x: 0, y: 10 }); cap.textContent = "Recent boots"; svg.appendChild(cap);
-      hist.forEach(function (b, i) {
-        var y = 18 + i * rowH, bh = 11, labelW = 78, barX = labelW + 8, barMax = W - barX - 64;
-        var t = el("text", { class: "tick", x: labelW, y: y + bh - 2, "text-anchor": "end" });
-        t.textContent = new Date(b.t).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }) + " " +
-                        new Date(b.t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
-        svg.appendChild(t);
-        var w = Math.max(2, (b.BootTime / maxV) * barMax);
-        svg.appendChild(el("path", { d: roundedRight(barX, y, w, bh, 4), fill: "var(--s1)" }));
-        var vl = el("text", { class: "dlabel", x: barX + w + 7, y: y + bh - 2 });
-        vl.textContent = secs(b.BootTime); svg.appendChild(vl);
-      });
-      host.appendChild(svg);
-    }
+    // Right: the trend, spaced BY BOOT rather than by time. On a months-long time
+    // axis, five reboots inside an hour (an update, a troubleshooting session)
+    // collapse into one dot and only one of them can be hovered. One slot per boot
+    // keeps every boot visible; same-day runs are shaded so the cluster still reads
+    // as one day, and the date labels the first boot of each day.
+    var chart = document.createElement("div");
+    host.appendChild(chart);
+    var pts = [], byT = {}, ticks = [], bands = [];
+    var dayKey = function (t) { return new Date(t).toDateString(); };
+    var dayOf = all.map(function (b) { return dayKey(b.t); });
+    var perDay = {};
+    dayOf.forEach(function (d) { perDay[d] = (perDay[d] || 0) + 1; });
+    var nth = [];
+    all.forEach(function (b, i) {
+      var v = Math.round(b.BootTime / 100) / 10;
+      pts.push({ t: i, v: v }); byT[i] = v;
+      nth[i] = (i > 0 && dayOf[i] === dayOf[i - 1]) ? nth[i - 1] + 1 : 1;
+      if (nth[i] === 1) {
+        ticks.push({ t: i, label: new Date(b.t).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }) });
+        if (perDay[dayOf[i]] > 1) bands.push({ t0: i - 0.4, t1: i + perDay[dayOf[i]] - 1 + 0.4 });
+      }
+    });
+    lineChart(chart, {
+      t0: -0.6, t1: all.length - 0.4, gapMs: Infinity, tickAt: ticks, bands: bands,
+      unit: " s", dp: 1, H: 200, label: "Total boot time, one point per boot",
+      fmtHead: function (i) {
+        var n = perDay[dayOf[i]];
+        return fmtDT(all[i].t) + (n > 1 ? " · boot " + nth[i] + " of " + n + " that day" : "");
+      },
+      ref: avg && avg.n >= 2 ? { v: avg.mean / 1000, label: "avg " + secs(Math.round(avg.mean)) } : null,
+      series: [{ name: "Boot time", color: "var(--s1)", pts: pts, byT: byT,
+                 detail: function (i) {
+                   var b = all[i];
+                   return b ? BOOT_DETAIL.filter(function (c) { return b[c.k] != null; }).map(function (c) {
+                     return '<div class="tr"><span>' + esc(c.label) + '</span><span class="tv">' + esc(secs(b[c.k])) + "</span></div>";
+                   }).join("") : "";
+                 } }]
+    });
   }
 
   // ---- event filtering -----------------------------------------------------

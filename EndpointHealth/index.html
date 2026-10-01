@@ -101,6 +101,9 @@
   }
   .sel:hover { background: var(--chip-on); }
   .sel:focus-visible { outline: 2px solid var(--s1); outline-offset: 1px; }
+  /* The popup list doesn't pick up the translucent chip, so options need an opaque
+     surface of their own or they render dark-on-dark in dark mode. */
+  .sel option { background: var(--surface); color: var(--ink); }
 
   /* ---------- fleet grid ---------- */
   .fleet { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 480px)); gap: 18px; }
@@ -248,6 +251,14 @@
         <option value="10" selected>Last 10 minutes</option>
         <option value="30">Last 30 minutes</option>
         <option value="60">Last hour</option>
+        <option value="120">Last 2 hours</option>
+        <option value="240">Last 4 hours</option>
+        <option value="480">Last 8 hours</option>
+        <option value="1440">Last day</option>
+        <option value="2880">Last 2 days</option>
+        <option value="4320">Last 3 days</option>
+        <option value="5760">Last 4 days</option>
+        <option value="7200">Last 5 days</option>
       </select>
     </div>
   </div>
@@ -356,6 +367,9 @@
     return (sp > n * 0.6 ? cut.slice(0, sp) : cut) + "\u2026";
   }
   function windowLabel() {
+    if (WINDOW_MIN >= 1440 && WINDOW_MIN % 1440 === 0) {
+      return WINDOW_MIN === 1440 ? "day" : (WINDOW_MIN / 1440) + " days";
+    }
     return WINDOW_MIN >= 60
       ? (WINDOW_MIN / 60) + " hour" + (WINDOW_MIN === 60 ? "" : "s")
       : WINDOW_MIN + " minutes";

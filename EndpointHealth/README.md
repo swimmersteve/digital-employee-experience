@@ -148,13 +148,15 @@ as blue screens. The collector requires 1001 *and* a provider matching
 Machine specs (cores, RAM, OS) and the live CPU/memory figures are deliberately not
 on this page — they are one click away in the drill-down.
 
-**Evaluation window** is a dropdown: last 10 minutes (default), 30 minutes, or
-1 hour. Changing it re-evaluates instantly against data already in the page — no
-refetch — and the choice is remembered between visits, like the drill-down's Range
-control. 1 hour is the ceiling because that is how much history `status.js` carries;
-to go further, raise `-StatusWindowMinutes` on the collector and add the option to
-the `selWindow` dropdown in `index.html`. The page detects the mismatch and says so
-rather than silently under-reporting.
+**Evaluation window** is a dropdown: last 10 minutes (default), 30 minutes, 1, 2, 4
+or 8 hours, or 1–5 days. Changing it re-evaluates instantly against data already in
+the page — no refetch — and the choice is remembered between visits, like the
+drill-down's Range control. 5 days is the ceiling because that is how much history
+`status.js` carries (`-StatusWindowMinutes`, default 7200); to go further, raise it
+on the collector and add the option to the `selWindow` dropdown in `index.html`. The
+page detects the mismatch and says so rather than silently under-reporting. To keep
+`status.js` small, PLA events older than an hour are only published if they look
+like alerts (Warning or above, ID 2031, or alert wording).
 
 ### Two things to check before trusting the green
 
@@ -318,7 +320,7 @@ with `-PlaLevels 1,2,3` if its informational entries turn out to be noise.
 
 ### Resource usage — one `Get-Counter` call per run
 
-The dashboard charts **CPU**, **memory** and **disk activity**, three panes across,
+The dashboard charts **CPU**, **memory**, **disk activity** and **GPU**, four panes across,
 plotting every raw 10-minute sample with a dot on each one — no bucketing, no averaging. The x
 axis is a real time scale (position comes from the timestamp, not an array index),
 so a gap in collection shows as a break in the line rather than a straight line
@@ -373,14 +375,29 @@ there if you ever want a pane back. To stop collecting them entirely, pass
 Two samples a second apart, because rate counters need a delta and a single read
 can legitimately return zero.
 
-### Top processes — three panes
+#### How GPU busy % is derived (1.9.0)
 
-**Top 10 by CPU**, **top 10 by memory**, **top 10 by disk activity** — each sitting
+The GPU pane plots `gpu`, computed the way Task Manager does. Each
+`\GPU Engine(*)\Utilization Percentage` instance is one process on one engine, so
+the collector sums across processes per physical engine, then takes the **busiest
+engine across all adapters** (both GPUs on a hybrid laptop). Averaging would hide a
+pegged 3D engine behind a dozen idle copy/video engines. It also records which
+engine that was (`gpuEng`: 3D, VideoDecode, Compute...) and dedicated/shared GPU
+memory in use (`gpuMemMB`, `gpuShMB`, summed across adapters).
+
+The GPU counters are only requested when the `GPU Engine` counter set exists —
+most VMs and servers don't have it, and asking for it anyway would fail the bulk
+read every run. Passing `-CounterPaths` also turns GPU collection off. Enumerating
+the per-process engine instances adds roughly a second to each run.
+
+### Top processes — four panes
+
+**Top 10 by CPU**, **top 10 by memory**, **top 10 by disk activity**, **top 10 by GPU** — each sitting
 directly under the chart it belongs to, so each column reads top to bottom. These
 are genuinely different lists: the process burning CPU
 is usually not the one holding memory (audiodg, dwm, SearchIndexer and TiWorker
 show up on one, Code and chrome on the other), and neither is reliably the one
-hammering the disk — which is the whole reason there are three panes.
+hammering the disk or drawing on the GPU — which is the whole reason there are four panes.
 
 Each pane labels its own metric only. A `1.3 GB` sitting next to a percentage makes
 the bar look like it measures memory; the other figures are one hover away in the
@@ -389,7 +406,7 @@ unambiguously — say the word if you want that stripped too.
 
 Processes are grouped by name and summed across instances; `×12` means twelve
 processes of that name. Bar colour matches the chart above it — blue for CPU,
-orange for memory, aqua for disk.
+orange for memory, aqua for disk, violet for GPU.
 
 CPU % and disk I/O are both **true interval averages**, not instantaneous readings:
 the cumulative counters are diffed against the previous run's baseline in
@@ -398,6 +415,47 @@ Both panes therefore need two runs before they have anything to show, and say so
 until then. A negative delta — which happens whenever one process of a group exits
 between runs — is dropped rather than clamped to zero, because that interval is
 unknowable, not idle.
+
+GPU % is the exception: it needs no baseline, because it comes from the same
+one-second `GPU Engine` counter read as the GPU chart. Each process is credited with
+its busiest engine, as Task Manager does, and same-named instances are summed and
+clamped at 100%. Processes at 0% are left out, so on an idle office machine the pane
+says the GPU was idle rather than drawing ten empty bars.
+
+### Watched processes — claude.exe (1.10.0)
+
+Below the top-10 panes, the dashboard has a section for each name in the
+collector's `-WatchProcess` (default `claude`): **four charts** — CPU, private
+memory, disk I/O and GPU for all running instances combined, over the selected
+range, coloured like the machine-wide row above. Click a point on any chart and the
+headline figures rewind to that moment along with the rest of the page.
+
+The collector still records every instance (the Claude desktop app is Electron, so
+a dozen `claude.exe` processes run at once) in each perf sample under
+`watch.claude.p`, labelled by role, so the per-process detail is in `perf.ndjson`
+even though the dashboard no longer shows it as a table. Roles come from the
+command line: no `--type` is the app's **Main** process; `--type=renderer`,
+`gpu-process` and `crashpad-handler` are the Renderer, GPU process and Crash
+handler; `--type=utility` is labelled by its sub-type (Network, Node, Audio, Video
+capture, Storage). A `claude.exe` under `...\claude-code\<version>\` is **Claude
+Code**, shown with its version.
+
+How each figure is measured:
+
+| Figure | Source | Notes |
+|---|---|---|
+| CPU | `Win32_Process` kernel + user time | Diffed against the previous run, as a share of all cores (Task Manager's convention). A process that started since the last run is measured from its start. |
+| Private memory | `Win32_Process.PrivatePageCount` (bytes, despite the name) | **The one to add up.** Electron processes share pages, so the working-set total double-counts. |
+| Working set | `Win32_Process.WorkingSetSize` | Shown for comparison with Task Manager's details tab. |
+| Disk I/O | `Win32_Process` read + write transfer counts | Same caveat as the disk pane below: all file-handle I/O, including cache hits and pipes. |
+| GPU | `GPU Engine` counters, by PID | Busiest engine per process, from the same one-second read as the GPU chart. |
+
+Baselines are keyed by PID **and** creation time and kept in `state.json`, so a
+recycled PID never inherits another process's counters. One filtered CIM query per
+name; about 80 ms a run. Storage cost is about 90 bytes per instance per sample —
+roughly 1.2 KB a minute for the desktop app plus one Claude Code session, which
+roughly doubles `perf.ndjson`/`perf.js`. Pass `-WatchProcess @()` to turn it off, or
+`-WatchProcess claude, Teams` to watch more than one app.
 
 #### What the disk pane actually measures (1.8.0)
 
@@ -418,16 +476,16 @@ actual question.
 If the CIM query fails, the collector logs `Per-process I/O unavailable` and carries
 on; the CPU and memory panes are unaffected and the disk pane says what to check.
 
-The collector stores the **union** of the three top-10 sets rather than three
-separate arrays — they overlap heavily, so the union is typically 14–20 entries
-instead of 30. Each pane re-ranks that one array by its own metric, which is also
-why a pane can legitimately show fewer than 10 rows: a process outside all three
-unions was never stored. `-TopProcessCount` changes the depth of all three.
+The collector stores the **union** of the four top-10 sets rather than four
+separate arrays — they overlap heavily, so the union is typically 14–22 entries
+instead of 40. Each pane re-ranks that one array by its own metric, which is also
+why a pane can legitimately show fewer than 10 rows: a process outside all four
+sets was never stored. `-TopProcessCount` changes the depth of all four.
 
-**Click any point on the CPU, memory or disk chart** and the process panes rewind to that
+**Click any point on the CPU, memory, disk or GPU chart** and the process panes rewind to that
 moment — the top processes as they were in that sample, with the CPU and I/O each
-used over the interval ending there. The selected sample is marked on all three
-charts, and every headline figure switches to its values so CPU, memory, disk and
+used over the interval ending there. The selected sample is marked on all four
+charts, and every headline figure switches to its values so CPU, memory, disk, GPU and
 processes always describe the same instant. Click the same point again, or use **Back to latest**, to return.
 Changing the range drops a selection that falls outside the new window.
 
@@ -441,6 +499,35 @@ Event IDs 100 / 200 / 300 from `Microsoft-Windows-Diagnostics-Performance/Operat
 processing. Field names vary across Windows builds, so the collector reads every
 named field from the event XML and keeps the ones that look like durations rather
 than assuming a fixed schema. These records only appear after a restart or sign-in.
+
+The card is a **trend** (1.11.0): total boot time for every boot on record, one point
+per boot, against a dashed **historical average** line.
+
+The x axis is **spaced by boot, not by time**. On a months-long time axis, a run of
+reboots inside an hour — an update, a crash loop, someone troubleshooting —
+collapses into one dot, and only one of them can be hovered. One slot per boot keeps
+every boot visible. Boots on the same day are **shaded as a group**, the date labels
+the first boot of each day, and the tooltip says "boot 3 of 5 that day". Because
+several boots in a day is a signal in itself, the left column also names the day with
+the most boots and counts the days with two or more. The cost of this axis: gaps
+between boots aren't to scale, so read dates off the labels, not the spacing. The left column puts the
+latest boot and shutdown in words, with their difference from average — red beyond
+10% slower, green beyond 10% faster, muted in between. Hover a point for that boot's
+breakdown: main path, post boot, and the logon half of the boot — profile load
+(`BootUserProfileProcessingTime`), Explorer start (`BootExplorerInitTime`) and logon
+wait (`UserLogonWaitDuration`), all fields of the boot event itself. The card does
+not follow the range picker; boots are a few a week, so a trend needs months.
+
+Two things make the average worth having:
+
+- **One-time backfill.** The collector normally reads this log forward from install,
+  so a new install has one or two boots to average. On its first 1.11.0 run it reads
+  the log's existing history (up to `-BootHistoryDays`, default 365) once, and records
+  `BootBackfillUtc` in `state.json` so it never repeats. Boots already in the store
+  come back too, now with the logon fields; the dashboard merges records by time +
+  event id rather than counting them twice.
+- **Separate retention.** Boot and shutdown records are kept for `-BootHistoryDays`,
+  not `-RetentionDays`. They are a few per week, so a year of them is a few KB.
 
 ## Why it does not read C:\PerfLogs\*.blg
 

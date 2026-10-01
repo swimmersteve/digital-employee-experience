@@ -177,7 +177,11 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopOnIdleEnd `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 5)
-$settings.Priority = 7   # below normal; this is background telemetry, not urgent work
+# Task Scheduler priority also sets the process's I/O and memory priority: 7-8
+# (below normal) gets low I/O, so under disk or CPU pressure runs were starved and
+# samples went missing -- exactly when they were wanted. 2-3 is above-normal CPU
+# with normal I/O; a run is a few seconds, so the cost to the user is negligible.
+$settings.Priority = 2
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false

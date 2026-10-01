@@ -49,20 +49,33 @@
     How many processes (grouped by name) to record per sample, for EACH ranking.
     Default 10, i.e. the top 10 by memory plus the top 10 by CPU, de-duplicated.
 
+.PARAMETER WatchProcess
+    Process names (without .exe) to track instance by instance -- CPU, private and
+    working-set memory, disk I/O and GPU for every running copy, plus totals.
+    Default 'claude'. Pass @() to turn it off. Each watched copy adds roughly 90
+    bytes to every perf sample.
+
 .PARAMETER CounterPaths
     Override the performance counters sampled. Counter paths are LOCALISED by
     Windows display language -- the defaults are the English names. On a non-English
     build, pass the localised paths here or the sample is skipped (and logged).
 
 .PARAMETER StatusWindowMinutes
-    How much recent history status.js carries for the front page. Default 60.
-    The front page's evaluation window cannot exceed this, so raise it if you add
-    a longer option to the picker.
+    How much recent event history status.js carries for the front page. Default
+    7200 (5 days), matching the longest option in the front page's evaluation
+    window picker; that window cannot exceed this, so raise it if you add a longer
+    option. The CPU sparkline is capped at 60 minutes regardless.
 
 .PARAMETER RelHistoryDays
     How many days of Windows Reliability history to publish. Default 30. Reliability
     Monitor itself only retains about 28 days, so asking for more simply yields what
     it has.
+
+.PARAMETER BootHistoryDays
+    How far back boot and shutdown records are kept -- and, on the first run of
+    1.11.0, backfilled from the Diagnostics-Performance log -- for the dashboard's
+    historical average. Default 365. Independent of -RetentionDays; boot records
+    are a few per week, so a year of them is a few KB.
 
 .PARAMETER SkipPerf
     Collect events only; no Get-Counter sample, no process list.
@@ -84,9 +97,11 @@ param(
     [int[]]    $PlaLevels            = @(),
     [int]      $MessageMaxChars      = 400,
     [int]      $TopProcessCount      = 10,
+    [string[]] $WatchProcess         = @('claude'),
     [string[]] $CounterPaths         = @(),
-    [int]      $StatusWindowMinutes  = 60,
+    [int]      $StatusWindowMinutes  = 7200,
     [int]      $RelHistoryDays       = 30,
+    [int]      $BootHistoryDays      = 365,
     [switch]   $SkipPerf
 )
 
@@ -97,7 +112,13 @@ param(
 Set-StrictMode -Version 1.0
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.8.0'
+# A loaded machine is exactly when this data matters, so don't queue behind the
+# load. The scheduled task asks for this too; setting it here also covers manual
+# runs and tasks registered by an older installer. A run is a few seconds of work,
+# so AboveNormal (not High) is enough to get scheduled without hurting the user.
+try { [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'AboveNormal' } catch { }
+
+$ScriptVersion = '1.11.0'
 $PlaLogName    = 'Microsoft-Windows-Diagnosis-PLA/Operational'
 $DiagPerfLog   = 'Microsoft-Windows-Diagnostics-Performance/Operational'
 
@@ -446,6 +467,7 @@ Set-StateProperty -Object $state -Name 'RelHist'  -Value $relHist
 # Performance sample
 # ---------------------------------------------------------------------------
 $perfRecords = New-Object System.Collections.Generic.List[object]
+$GpuByPid    = $null   # pid -> GPU %, filled by Get-PerfSample when GPU counters exist
 
 function Get-SampleValue {
     param($Samples, [string]$Pattern, [switch]$Sum)
@@ -466,6 +488,14 @@ function Get-PerfSample {
         '\Network Interface(*)\Bytes Total/sec'
     )
     if ($CounterPaths -and @($CounterPaths).Count -gt 0) { $paths = @($CounterPaths) }
+    # GPU counter sets only exist with a WDDM 2.x driver -- not on most VMs or
+    # servers. Asking for a missing set fails the bulk read and drops us into the
+    # slow per-counter retry on every run, so only ask when it is there.
+    elseif ([System.Diagnostics.PerformanceCounterCategory]::Exists('GPU Engine')) {
+        $paths += '\GPU Engine(*)\Utilization Percentage'
+        $paths += '\GPU Adapter Memory(*)\Dedicated Usage'
+        $paths += '\GPU Adapter Memory(*)\Shared Usage'
+    }
 
     # Two samples one second apart: rate counters (% Processor Time especially) need
     # a delta, and a single-sample read can legitimately come back as zero.
@@ -505,6 +535,7 @@ function Get-PerfSample {
         t   = (Get-UtcStamp $RunStart)
         cpu = $null; memMB = $null; memPct = $null
         dskPct = $null; dskMs = $null; dskQ = $null; netKBs = $null
+        gpu = $null; gpuEng = $null; gpuMemMB = $null; gpuShMB = $null
     }
 
     $cpu = Get-SampleValue -Samples $samples -Pattern '*\% processor time'
@@ -538,14 +569,57 @@ function Get-PerfSample {
     if ($null -ne $dq)      { $rec['dskQ']   = [math]::Round([double]$dq, 2) }
     if ($null -ne $netBps)  { $rec['netKBs'] = [math]::Round([double]$netBps / 1KB, 1) }
 
+    # GPU utilisation, computed the way Task Manager does. Each instance is one
+    # process on one engine (pid_X_luid_A_phys_P_eng_E_engtype_T), so sum across
+    # processes per physical engine, then take the busiest engine across every
+    # adapter. Averaging engines would hide a pegged 3D engine behind a dozen idle
+    # copy/video ones; summing them would overshoot 100%.
+    #
+    # The same instances carry the pid, so the per-process figure falls out of the
+    # same read: a process's GPU% is its busiest engine (again as Task Manager
+    # shows it). Get-TopProcesses picks this up to rank the GPU pane; $null means
+    # the counters aren't there, as opposed to an empty map meaning nothing ran.
+    $engBusy = @{}; $engType = @{}; $pidEng = @{}
+    $script:GpuByPid = $null
+    foreach ($s in @($samples | Where-Object { $_.Path -like '*\utilization percentage' })) {
+        if ($s.InstanceName -match '^pid_(\d+)_luid_(\w+?_\w+?)_phys_(\d+)_eng_(\d+)_engtype_(.*)$') {
+            $key = "$($Matches[2])|$($Matches[3])|$($Matches[4])"
+            $v   = [double]$s.CookedValue
+            $engBusy[$key] = [double]$engBusy[$key] + $v
+            $engType[$key] = $Matches[5]
+            $pk = "$($Matches[1])|$key"
+            $pidEng[$pk] = [double]$pidEng[$pk] + $v
+        }
+    }
+    if ($engBusy.Count -gt 0) {
+        $script:GpuByPid = @{}
+        foreach ($e in $pidEng.GetEnumerator()) {
+            $procId = [int]($e.Key.Split('|')[0])
+            if ($e.Value -gt [double]$script:GpuByPid[$procId]) { $script:GpuByPid[$procId] = $e.Value }
+        }
+    }
+    if ($engBusy.Count -gt 0) {
+        $top = $engBusy.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1
+        $g = [double]$top.Value
+        if ($g -gt 100) { $g = 100 }
+        $rec['gpu'] = [math]::Round($g, 1)
+        # Which engine that was (3D, VideoDecode, Compute...) -- worth knowing when
+        # "GPU 90%" turns out to be a video call rather than a game or a model.
+        if ($g -ge 1) { $rec['gpuEng'] = $engType[$top.Key] }
+    }
+    $gDed = Get-SampleValue -Samples $samples -Pattern '*\dedicated usage' -Sum
+    $gSh  = Get-SampleValue -Samples $samples -Pattern '*\shared usage' -Sum
+    if ($null -ne $gDed) { $rec['gpuMemMB'] = [math]::Round([double]$gDed / 1MB, 0) }
+    if ($null -ne $gSh)  { $rec['gpuShMB']  = [math]::Round([double]$gSh / 1MB, 0) }
+
     return [pscustomobject]$rec
 }
 
 function Get-TopProcesses {
     <#
       Groups processes by name and returns the UNION of the top N by working set,
-      the top N by CPU and the top N by I/O throughput, so the dashboard can rank
-      three ways from one list. The sets overlap heavily but not completely -- the
+      the top N by CPU, the top N by I/O throughput and the top N by GPU, so the
+      dashboard can rank four ways from one list. The sets overlap heavily but not completely -- the
       process burning CPU is rarely the one holding memory, and neither is usually
       the one hammering the disk, which is the whole reason three panes exist.
       Storing the union rather than three separate arrays keeps most of the
@@ -572,11 +646,20 @@ function Get-TopProcesses {
         $now = @(Get-Process -ErrorAction SilentlyContinue |
                  Group-Object -Property ProcessName |
                  ForEach-Object {
+                     # GPU is summed across same-named instances like the rest,
+                     # clamped because two instances can each peg a different engine.
+                     $g = $null
+                     if ($null -ne $script:GpuByPid) {
+                         $g = 0.0
+                         foreach ($proc in $_.Group) { $g += [double]$script:GpuByPid[[int]$proc.Id] }
+                         $g = [math]::Round([math]::Min($g, 100), 1)
+                     }
                      [pscustomobject]@{
                          n   = $_.Name
                          ws  = [math]::Round((($_.Group | Measure-Object -Property WorkingSet64 -Sum -ErrorAction SilentlyContinue).Sum) / 1MB, 1)
                          cpu = [double](($_.Group | Measure-Object -Property CPU -Sum -ErrorAction SilentlyContinue).Sum)
                          c   = $_.Count
+                         gpu = $g
                      }
                  })
     } catch {
@@ -653,13 +736,17 @@ function Get-TopProcesses {
         $byIo  = @($now | Where-Object { $null -ne $_.iokbs -and $_.iokbs -gt 0 } |
                    Sort-Object -Property iokbs -Descending | Select-Object -First $Top)
     }
+    # GPU needs no baseline: it comes from the 1-second counter read in
+    # Get-PerfSample, so it is a point-in-time figure rather than an interval one.
+    $byGpu = @($now | Where-Object { $null -ne $_.gpu -and $_.gpu -gt 0 } |
+               Sort-Object -Property gpu -Descending | Select-Object -First $Top)
 
     $seen = @{}
     $out  = New-Object System.Collections.Generic.List[object]
-    foreach ($p in (@($byMem) + @($byCpu) + @($byIo))) {
+    foreach ($p in (@($byMem) + @($byCpu) + @($byIo) + @($byGpu))) {
         if ($seen.ContainsKey($p.n)) { continue }
         $seen[$p.n] = $true
-        $out.Add([pscustomobject][ordered]@{ n = $p.n; ws = $p.ws; c = $p.c; cpu = $p.pct; io = $p.iokbs })
+        $out.Add([pscustomobject][ordered]@{ n = $p.n; ws = $p.ws; c = $p.c; cpu = $p.pct; io = $p.iokbs; gpu = $p.gpu })
     }
 
     # Refresh the baseline. Bound it: only processes that have actually used CPU,
@@ -683,14 +770,157 @@ function Get-TopProcesses {
     return $out.ToArray()
 }
 
+function Get-ProcessRole {
+    <#
+      A readable label for one instance of a watched process. Electron apps (the
+      Claude desktop app among them) run a dozen copies of the same exe, told
+      apart only by --type on the command line, so that is what gets decoded.
+      Claude Code ships as its own claude.exe under ...\claude-code\<version>\.
+    #>
+    param([string]$CommandLine, [string]$ExePath)
+    $cl = [string]$CommandLine
+    if ($ExePath -match '\\claude-code\\([\d.]+)\\') { return "Claude Code $($Matches[1])" }
+    if ($ExePath -match '\\\.local\\bin\\')         { return 'Claude Code' }
+    if ($cl -match '--type=utility\b' -and $cl -match '--utility-sub-type=([\w.]+)') {
+        $sub = $Matches[1]
+        switch -Regex ($sub) {
+            '^network\.'       { return 'Network service' }
+            '^node\.'          { return 'Node service' }
+            '^audio\.'         { return 'Audio service' }
+            '^video_capture\.' { return 'Video capture' }
+            '^storage\.'       { return 'Storage service' }
+            default            { return "Utility ($(($sub -split '\.')[0]))" }
+        }
+    }
+    if ($cl -match '--type=([\w-]+)') {
+        switch ($Matches[1]) {
+            'renderer'         { return 'Renderer' }
+            'gpu-process'      { return 'GPU process' }
+            'crashpad-handler' { return 'Crash handler' }
+            default            { return $Matches[1] }
+        }
+    }
+    return 'Main'
+}
+
+function Get-WatchedProcesses {
+    <#
+      Per-INSTANCE CPU, memory, disk and GPU for every process named in
+      -WatchProcess, plus their totals, for the dashboard's watched-process
+      section. Unlike Get-TopProcesses this does not group by name -- the point
+      is to see which of the fourteen claude.exe processes is doing the work.
+
+      One filtered Win32_Process query per name supplies everything but GPU:
+      cumulative CPU time and I/O bytes (diffed against the previous run, like the
+      top-process panes), working set, and private bytes. Instances are keyed by
+      pid + creation time so a recycled pid never inherits someone else's
+      baseline. A process that started since the previous run is diffed against
+      zero from its start time, so short-lived ones still get a real figure.
+
+      Memory: private bytes is the column to add up. Electron processes share a
+      lot of pages, so summing working sets double-counts; private does not.
+    #>
+    $out = [ordered]@{}
+    $names = @($WatchProcess | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($names.Count -eq 0) { return $null }
+
+    $nowUtc   = $RunStart.ToUniversalTime()
+    $prevBase = Get-StateProperty -Object $state -Name 'WatchBase'
+    $prevAt   = ConvertTo-Utc -Value (Get-StateProperty -Object $state -Name 'WatchAt') -Default ([datetime]::MinValue)
+    $havePrev = ($prevAt -gt [datetime]::MinValue) -and (($nowUtc - $prevAt).TotalSeconds -lt 7200)
+    $newBase  = [ordered]@{}
+
+    foreach ($name in $names) {
+        $label = $name -replace '\.exe$', ''
+        $exe   = "$label.exe" -replace "'", "''"
+        $rows  = @()
+        try {
+            $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='$exe'" `
+                        -Property ProcessId, ExecutablePath, CommandLine, CreationDate, KernelModeTime,
+                                  UserModeTime, WorkingSetSize, PrivatePageCount, ReadTransferCount,
+                                  WriteTransferCount -ErrorAction Stop)
+        } catch {
+            Write-Log "Watched process '$label' unavailable: $($_.Exception.Message)" 'WARN'
+            continue
+        }
+
+        $list = New-Object System.Collections.Generic.List[object]
+        $tCpu = $null; $tIo = $null; $tGpu = $null; $tWs = 0.0; $tPv = 0.0
+        foreach ($r in $rows) {
+            $procId  = [int]$r.ProcessId
+            $created = $null
+            if ($r.CreationDate) { $created = ([datetime]$r.CreationDate).ToUniversalTime() }
+            $key  = '{0}@{1}' -f $procId, $(if ($created) { $created.Ticks } else { 0 })
+            $cpuT = [double]$r.KernelModeTime + [double]$r.UserModeTime          # 100ns units
+            $ioB  = [double]$r.ReadTransferCount + [double]$r.WriteTransferCount
+            $newBase[$key] = [pscustomobject]@{ c = $cpuT; io = $ioB }
+
+            $baseC = $null; $baseIo = $null; $since = $null
+            if ($havePrev -and $prevBase -and ($prevBase.PSObject.Properties.Name -contains $key)) {
+                $b = $prevBase.$key; $baseC = [double]$b.c; $baseIo = [double]$b.io; $since = $prevAt
+            } elseif ($havePrev -and $created -and $created -ge $prevAt) {
+                $baseC = 0.0; $baseIo = 0.0; $since = $created
+            }
+
+            $cpu = $null; $io = $null
+            if ($null -ne $since) {
+                $el = ($nowUtc - $since).TotalSeconds
+                if ($el -gt 1) {
+                    $dc = $cpuT - $baseC
+                    if ($dc -ge 0) { $cpu = [math]::Round(($dc / 1e7) / $el / $cores * 100, 2) }
+                    $di = $ioB - $baseIo
+                    if ($di -ge 0) { $io = [math]::Round(($di / $el) / 1KB, 1) }
+                }
+            }
+            $gpu = $null
+            if ($null -ne $script:GpuByPid) { $gpu = [math]::Round([math]::Min([double]$script:GpuByPid[$procId], 100), 1) }
+
+            $ws = [math]::Round([double]$r.WorkingSetSize / 1MB, 1)
+            $pv = [math]::Round([double]$r.PrivatePageCount / 1MB, 1)   # bytes, despite the name
+            $tWs += $ws; $tPv += $pv
+            if ($null -ne $cpu) { $tCpu = [double]$tCpu + $cpu }
+            if ($null -ne $io)  { $tIo  = [double]$tIo  + $io }
+            if ($null -ne $gpu) { $tGpu = [double]$tGpu + $gpu }
+
+            $list.Add([pscustomobject][ordered]@{
+                pid = $procId
+                r   = (Get-ProcessRole -CommandLine $r.CommandLine -ExePath $r.ExecutablePath)
+                cpu = $cpu; ws = $ws; pv = $pv; io = $io; gpu = $gpu
+            })
+        }
+
+        $out[$label] = [pscustomobject][ordered]@{
+            n   = $list.Count
+            cpu = $(if ($null -ne $tCpu) { [math]::Round($tCpu, 2) } else { $null })
+            ws  = [math]::Round($tWs, 0)
+            pv  = [math]::Round($tPv, 0)
+            io  = $(if ($null -ne $tIo)  { [math]::Round($tIo, 1) } else { $null })
+            gpu = $(if ($null -ne $tGpu) { [math]::Round([math]::Min($tGpu, 100), 1) } else { $null })
+            p   = $list.ToArray()
+        }
+    }
+
+    Set-StateProperty -Object $state -Name 'WatchBase' -Value ([pscustomobject]$newBase)
+    Set-StateProperty -Object $state -Name 'WatchAt'   -Value (Get-UtcStamp $RunStart)
+    return [pscustomobject]$out
+}
+
 if (-not $SkipPerf) {
     $sample = Get-PerfSample
     $procs  = @(Get-TopProcesses -Top $TopProcessCount)
     if ($sample) {
         Add-Member -InputObject $sample -NotePropertyName 'procs' -NotePropertyValue $procs
+        $watch = Get-WatchedProcesses
+        if ($watch) {
+            Add-Member -InputObject $sample -NotePropertyName 'watch' -NotePropertyValue $watch
+            foreach ($w in $watch.PSObject.Properties) {
+                Write-Log ("Watch {0}: {1} process(es) cpu={2}% private={3}MB io={4}KB/s gpu={5}%" -f `
+                           $w.Name, $w.Value.n, $w.Value.cpu, $w.Value.pv, $w.Value.io, $w.Value.gpu)
+            }
+        }
         $perfRecords.Add($sample)
-        Write-Log ("Perf: cpu={0}% mem={1}% disk={2}% ({3}ms) net={4}KB/s procs={5}" -f `
-                   $sample.cpu, $sample.memPct, $sample.dskPct, $sample.dskMs, $sample.netKBs, $procs.Count)
+        Write-Log ("Perf: cpu={0}% mem={1}% disk={2}% ({3}ms) gpu={4}% net={5}KB/s procs={6}" -f `
+                   $sample.cpu, $sample.memPct, $sample.dskPct, $sample.dskMs, $sample.gpu, $sample.netKBs, $procs.Count)
     }
 } else {
     Write-Log 'Perf sampling skipped (-SkipPerf).'
@@ -699,25 +929,72 @@ if (-not $SkipPerf) {
 # ---------------------------------------------------------------------------
 # Boot / shutdown / logon durations
 # ---------------------------------------------------------------------------
+# The Boot* profile/Explorer fields and UserLogonWaitDuration live in the boot
+# event (100) itself and are the logon half of "boot and logon": how long the
+# user profile took to load, how long Explorer took to start, and how long the
+# user sat at the logon screen.
 $DurationFields = @('BootTime','MainPathBootTime','BootPostBootTime','ShutdownTime',
+                    'BootUserProfileProcessingTime','BootMachineProfileProcessingTime',
+                    'BootExplorerInitTime','UserLogonWaitDuration',
                     'LogonTime','UserLogonWaitTime','UserProfileProcessingTime',
                     'MachineProfileProcessingTime','TotalTime','Duration')
 
-$bootEvents = @(Get-NewLogEvents -LogName $DiagPerfLog -Ids $DiagPerfIds -IncludeData)
-foreach ($b in $bootEvents) {
-    $kind = switch ([int]$b.id) { 100 { 'boot' } 200 { 'shutdown' } 300 { 'logon' } default { "id$($b.id)" } }
-    $rec  = [ordered]@{ k = 'b'; t = $b.t; kind = $kind; id = [int]$b.id }
+function ConvertTo-BootRecord {
+    param($Evt)   # { t, id, data } as Get-NewLogEvents -IncludeData returns
+    $kind = switch ([int]$Evt.id) { 100 { 'boot' } 200 { 'shutdown' } 300 { 'logon' } default { "id$($Evt.id)" } }
+    $rec  = [ordered]@{ k = 'b'; t = $Evt.t; kind = $kind; id = [int]$Evt.id }
     $any  = $false
     foreach ($f in $DurationFields) {
-        if ($b.data -and ($b.data.PSObject.Properties.Name -contains $f)) {
-            $rec[$f] = [int64]$b.data.$f
+        if ($Evt.data -and ($Evt.data.PSObject.Properties.Name -contains $f)) {
+            $rec[$f] = [int64]$Evt.data.$f
             $any = $true
         }
     }
-    if (-not $any) { continue }      # nothing measurable in this one
-    $perfRecords.Add([pscustomobject]$rec)
+    if (-not $any) { return $null }   # nothing measurable in this one
+    return [pscustomobject]$rec
+}
+
+$bootEvents = @(Get-NewLogEvents -LogName $DiagPerfLog -Ids $DiagPerfIds -IncludeData)
+foreach ($b in $bootEvents) {
+    $rec = ConvertTo-BootRecord -Evt $b
+    if ($rec) { $perfRecords.Add($rec) }
 }
 Write-Log "$DiagPerfLog : $($bootEvents.Count) new boot/logon record(s)."
+
+# One-time backfill of boot history. The watermark above only ever reads forward
+# from install, so a new install has one or two boots to average -- but Windows
+# keeps months of them in this log. Read them once, then never again. Boots that
+# were already recorded are included on purpose: they come back with the logon
+# fields that older collectors didn't keep, and the dashboard merges duplicates
+# by time + id, preferring the record with more fields.
+if (-not (Get-StateProperty -Object $state -Name 'BootBackfillUtc')) {
+    $added = 0
+    try {
+        $since = $RunStart.AddDays(-1 * [Math]::Abs($BootHistoryDays))
+        $old = @(Get-WinEvent -FilterHashtable @{ LogName = $DiagPerfLog; Id = @(100, 200); StartTime = $since } `
+                              -MaxEvents 2000 -ErrorAction Stop)
+        foreach ($e in ($old | Sort-Object TimeCreated)) {
+            $data = [ordered]@{}
+            try {
+                foreach ($d in @(([xml]$e.ToXml()).Event.EventData.Data)) {
+                    if (-not $d) { continue }
+                    $num = 0L
+                    if ($d.Name -and [int64]::TryParse([string]$d.'#text', [ref]$num)) { $data[[string]$d.Name] = $num }
+                }
+            } catch { continue }
+            $rec = ConvertTo-BootRecord -Evt ([pscustomobject]@{ t = (Get-UtcStamp $e.TimeCreated); id = [int]$e.Id; data = [pscustomobject]$data })
+            if ($rec) { $perfRecords.Add($rec); $added++ }
+        }
+        Write-Log "Boot history backfill: $added record(s) from the last $BootHistoryDays days."
+    } catch {
+        if ($_.Exception.Message -notmatch 'No events were found') {
+            Write-Log "Boot history backfill failed: $($_.Exception.Message)" 'WARN'
+        } else {
+            Write-Log 'Boot history backfill: the log holds no older boots.'
+        }
+    }
+    Set-StateProperty -Object $state -Name 'BootBackfillUtc' -Value (Get-UtcStamp $RunStart)
+}
 
 # ---------------------------------------------------------------------------
 # Append
@@ -729,7 +1006,8 @@ function Add-Records {
     $nd = New-Object System.Collections.Generic.List[string]
     $js = New-Object System.Collections.Generic.List[string]
     foreach ($r in $items) {
-        $json = $r | ConvertTo-Json -Compress -Depth 5
+        # Depth 6: record > watch > name > p[] > process > value.
+        $json = $r | ConvertTo-Json -Compress -Depth 6
         $nd.Add($json)
         $js.Add("$PushVar.push($json);")
     }
@@ -751,7 +1029,10 @@ $null = Add-Records -Records $perfSorted -NdjsonPath $PerfFile -JsPath $PerfJsFi
 # would be the single heaviest thing this script does)
 # ---------------------------------------------------------------------------
 function Invoke-Trim {
-    param([string]$NdjsonPath, [string]$JsPath, [string]$PushVar, [datetime]$CutoffUtc)
+    # $KeepBootsUtc: boot/shutdown records ("k":"b") are a few per week and are
+    # what the dashboard averages over, so they get their own, longer retention.
+    param([string]$NdjsonPath, [string]$JsPath, [string]$PushVar, [datetime]$CutoffUtc,
+          [datetime]$KeepBootsUtc = $CutoffUtc)
 
     if (-not (Test-Path -LiteralPath $NdjsonPath)) { return }
     $tmpNd = "$NdjsonPath.tmp"
@@ -766,7 +1047,8 @@ function Invoke-Trim {
                 $keep = $true
                 try {
                     $o = $line | ConvertFrom-Json
-                    if ((ConvertTo-Utc -Value $o.t -Default ([datetime]::MinValue)) -lt $CutoffUtc) { $keep = $false }
+                    $limit = if ($o.k -eq 'b') { $KeepBootsUtc } else { $CutoffUtc }
+                    if ((ConvertTo-Utc -Value $o.t -Default ([datetime]::MinValue)) -lt $limit) { $keep = $false }
                 } catch { $keep = $false }   # unparseable line, drop it
                 if ($keep) { $swNd.WriteLine($line); $swJs.WriteLine("$PushVar.push($line);"); $kept++ }
                 else       { $dropped++ }
@@ -791,7 +1073,8 @@ if ($lastTrim) {
 if ($needTrim) {
     $cutoff = $RunStart.ToUniversalTime().AddDays(-1 * [Math]::Abs($RetentionDays))
     Invoke-Trim -NdjsonPath $EventsFile -JsPath $DataJsFile -PushVar 'EH'  -CutoffUtc $cutoff
-    Invoke-Trim -NdjsonPath $PerfFile   -JsPath $PerfJsFile -PushVar 'EHP' -CutoffUtc $cutoff
+    Invoke-Trim -NdjsonPath $PerfFile   -JsPath $PerfJsFile -PushVar 'EHP' -CutoffUtc $cutoff `
+                -KeepBootsUtc $RunStart.ToUniversalTime().AddDays(-1 * [Math]::Abs($BootHistoryDays))
     Set-StateProperty -Object $state -Name 'LastTrimUtc' -Value (Get-UtcStamp $RunStart)
 }
 
@@ -809,21 +1092,32 @@ if (Test-Path -LiteralPath $LogFile) {
 #
 # index.html polls this file every 30 seconds and repaints without reloading, so
 # it must stay small -- re-fetching a multi-megabyte data.js on a timer would be
-# worse than the reload it replaces. It carries the last 60 minutes of only the
-# things the health rule needs, leaving the rule itself in the page.
+# worse than the reload it replaces. It carries the last $StatusWindowMinutes of
+# only the events the health rule needs (plus a 60-minute CPU spark), leaving the
+# rule itself in the page.
 # ---------------------------------------------------------------------------
 function Write-StatusFile {
-    $cutoff   = $RunStart.ToUniversalTime().AddMinutes(-1 * [Math]::Abs($StatusWindowMinutes))
+    $cutoff      = $RunStart.ToUniversalTime().AddMinutes(-1 * [Math]::Abs($StatusWindowMinutes))
+    $cutoffStamp = Get-UtcStamp $cutoff
+    $hourCutoff = $RunStart.ToUniversalTime().AddMinutes(-60)
     $pla      = New-Object System.Collections.Generic.List[object]
     $crash    = New-Object System.Collections.Generic.List[object]
     $syscrash = New-Object System.Collections.Generic.List[object]
     $spark    = New-Object System.Collections.Generic.List[object]
     $lastBootRec = $null
 
-    # Tail reads only -- never re-parse the whole store for this.
+    # A fixed-size tail can't be trusted to reach back days, so stream the whole
+    # store -- but reject lines on their leading timestamp (ISO stamps compare as
+    # strings) and on a substring check before paying for ConvertFrom-Json.
     if (Test-Path -LiteralPath $EventsFile) {
-        foreach ($line in @(Get-Content -LiteralPath $EventsFile -Tail 400 -ErrorAction SilentlyContinue)) {
+        foreach ($line in [System.IO.File]::ReadLines($EventsFile)) {
             if (-not $line.Trim()) { continue }
+            if ($line.StartsWith('{"t":"') -and $line.Length -gt 26 -and
+                [string]::CompareOrdinal($line.Substring(6, 20), $cutoffStamp) -lt 0) { continue }
+            if (-not ($line.Contains($PlaLogName) -or
+                      $line.Contains('"Application Error"') -or $line.Contains('"Application Hang"') -or
+                      ($line.Contains('"log":"System"') -and
+                       ($line.Contains('"id":41,') -or $line.Contains('"id":6008,') -or $line.Contains('"id":1001,'))))) { continue }
             $o = $null
             try { $o = $line | ConvertFrom-Json } catch { continue }
             $t = ConvertTo-Utc -Value $o.t -Default ([datetime]::MinValue)
@@ -832,6 +1126,13 @@ function Write-StatusFile {
             if ($o.log -eq $PlaLogName) {
                 $m = $null
                 if ($o.PSObject.Properties.Name -contains 'msg') { $m = $o.msg }
+                # PLA logs thousands of informational housekeeping events a day
+                # ("segmented", "changed by"), which would bloat a file polled every
+                # 30s. Past the last hour, keep only what could be an alert -- the
+                # same level/wording test as PLA_ALERT_TEXT in index.html.
+                if ($t -lt $hourCutoff -and $o.lvl -notin @('Critical', 'Error', 'Warning') -and
+                    [int]$o.id -ne 2031 -and
+                    $m -notmatch '\b(alert|threshold|exceed\w*|above|below|limit)\b') { continue }
                 if ($m -and $m.Length -gt 200) { $m = $m.Substring(0, 200) }
                 $pla.Add([pscustomobject][ordered]@{ t = (Get-UtcStamp $t); lvl = $o.lvl; id = [int]$o.id; msg = $m })
             }
@@ -869,7 +1170,9 @@ function Write-StatusFile {
             if ($o.k -eq 'b' -and $o.kind -eq 'boot') {
                 $bt = $null
                 if ($o.PSObject.Properties.Name -contains 'BootTime') { $bt = [int64]$o.BootTime }
-                if ($null -ne $bt) {
+                # Newest wins, not last-in-file: the boot backfill appends older
+                # boots after newer ones.
+                if ($null -ne $bt -and ($null -eq $lastBootRec -or $t -gt (ConvertTo-Utc -Value $lastBootRec.t))) {
                     $lastBootRec = [pscustomobject][ordered]@{
                         t    = (Get-UtcStamp $t)
                         ms   = $bt
@@ -881,7 +1184,7 @@ function Write-StatusFile {
             }
 
             if ($o.k -ne 'p') { continue }
-            if ($t -lt $cutoff) { continue }
+            if ($t -lt $hourCutoff) { continue }
             if ($null -eq $o.cpu) { continue }
             $spark.Add(@([int64]([DateTimeOffset]$t).ToUnixTimeSeconds(), [double]$o.cpu))
         }
