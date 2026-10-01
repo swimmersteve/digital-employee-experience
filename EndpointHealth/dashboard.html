@@ -956,8 +956,15 @@
   function watchBlock(host, name, ix, o) {
     var id = "w" + ix + "_";
     var wrap = document.createElement("div");
+    // Display label from the collector ("claude.exe", "Codex"); pre-1.12 records
+    // have none, and were always a bare exe name.
+    var lbl = name + ".exe";
+    for (var li = perf.length - 1; li >= 0; li--) {
+      var lw = perf[li].watch && perf[li].watch[name];
+      if (lw) { if (lw.lbl) lbl = lw.lbl; break; }
+    }
     wrap.innerHTML =
-      '<div class="sechead">' + esc(name) + ".exe — all processes</div>" +
+      '<div class="sechead">' + esc(lbl) + " — all processes</div>" +
       '<div class="grid4" style="margin-bottom:16px">' +
         ["cpu", "mem", "io", "gpu"].map(function (m) {
           var t = { cpu: "CPU", mem: "Memory (private)", io: "Disk I/O", gpu: "GPU" }[m];

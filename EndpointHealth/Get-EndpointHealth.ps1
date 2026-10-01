@@ -50,10 +50,16 @@
     Default 10, i.e. the top 10 by memory plus the top 10 by CPU, de-duplicated.
 
 .PARAMETER WatchProcess
-    Process names (without .exe) to track instance by instance -- CPU, private and
-    working-set memory, disk I/O and GPU for every running copy, plus totals.
-    Default 'claude'. Pass @() to turn it off. Each watched copy adds roughly 90
-    bytes to every perf sample.
+    Apps to track instance by instance -- CPU, private and working-set memory,
+    disk I/O and GPU for every running process, plus totals. Each entry is either
+    a process name without .exe ('claude'), or 'Label=pattern;pattern' to group
+    processes under one label: WQL LIKE patterns (% any, _ one char, [_] a literal
+    underscore), matched against the install path when the pattern contains a
+    backslash and the exe name otherwise.
+    Default: 'claude' and 'Codex=codex%;%\OpenAI.Codex[_]%' -- the Codex desktop
+    app runs as ChatGPT.exe from the OpenAI.Codex package plus codex*.exe helpers.
+    Pass @() to turn it off. Each watched process adds roughly 90 bytes to every
+    perf sample.
 
 .PARAMETER CounterPaths
     Override the performance counters sampled. Counter paths are LOCALISED by
@@ -97,7 +103,7 @@ param(
     [int[]]    $PlaLevels            = @(),
     [int]      $MessageMaxChars      = 400,
     [int]      $TopProcessCount      = 10,
-    [string[]] $WatchProcess         = @('claude'),
+    [string[]] $WatchProcess         = @('claude', 'Codex=codex%;%\OpenAI.Codex[_]%'),
     [string[]] $CounterPaths         = @(),
     [int]      $StatusWindowMinutes  = 7200,
     [int]      $RelHistoryDays       = 30,
@@ -118,7 +124,7 @@ $ErrorActionPreference = 'Stop'
 # so AboveNormal (not High) is enough to get scheduled without hurting the user.
 try { [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'AboveNormal' } catch { }
 
-$ScriptVersion = '1.11.0'
+$ScriptVersion = '1.12.0'
 $PlaLogName    = 'Microsoft-Windows-Diagnosis-PLA/Operational'
 $DiagPerfLog   = 'Microsoft-Windows-Diagnostics-Performance/Operational'
 
@@ -776,11 +782,29 @@ function Get-ProcessRole {
       Claude desktop app among them) run a dozen copies of the same exe, told
       apart only by --type on the command line, so that is what gets decoded.
       Claude Code ships as its own claude.exe under ...\claude-code\<version>\.
+      Codex's helpers are separate executables: codex.exe named by its subcommand
+      (app-server, exec-server...), codex-<thing>.exe by <thing>.
     #>
-    param([string]$CommandLine, [string]$ExePath)
+    param([string]$CommandLine, [string]$ExePath, [string]$Name)
     $cl = [string]$CommandLine
     if ($ExePath -match '\\claude-code\\([\d.]+)\\') { return "Claude Code $($Matches[1])" }
-    if ($ExePath -match '\\\.local\\bin\\')         { return 'Claude Code' }
+    if ($ExePath -match '\\\.local\\bin\\claude')   { return 'Claude Code' }
+    if ($Name -ieq 'codex.exe') {
+        # First bare word after the exe, skipping "-c key=value" style options.
+        $rest = $cl -replace '^\s*("[^"]*"|\S+)', ''
+        $rest = $rest -replace '(^|\s)-c\s+\S+', ' ' -replace '(^|\s)--?[\w-]+(=\S+)?', ' '
+        if ($rest -match '^\s*([a-z][\w-]*)') { return "codex $($Matches[1])" }
+        return 'codex'
+    }
+    if ($Name -match '^codex-(.+)\.exe$') {
+        switch -Regex ($Matches[1]) {
+            '^windows-sandbox' { return 'Sandbox service' }
+            '^computer-use'    { return 'Computer use' }
+            '^code-mode-host'  { return 'Code mode host' }
+            '^chrome-native'   { return 'Chrome native host' }
+            default            { return ($Matches[1] -replace '-', ' ') }
+        }
+    }
     if ($cl -match '--type=utility\b' -and $cl -match '--utility-sub-type=([\w.]+)') {
         $sub = $Matches[1]
         switch -Regex ($sub) {
@@ -831,12 +855,30 @@ function Get-WatchedProcesses {
     $newBase  = [ordered]@{}
 
     foreach ($name in $names) {
-        $label = $name -replace '\.exe$', ''
-        $exe   = "$label.exe" -replace "'", "''"
+        # Two forms. A bare name ('claude') watches that exe. 'Label=p1;p2' watches
+        # every process matching any pattern -- WQL LIKE (% and _ wildcards, [_]
+        # for a literal underscore), tested against the install path when the
+        # pattern contains a backslash and against the exe name otherwise. Apps
+        # like Codex need the second form: the desktop app is ChatGPT.exe from the
+        # OpenAI.Codex package, alongside codex*.exe helpers, and a plain
+        # 'ChatGPT' would also catch the unrelated ChatGPT app.
+        if ($name -match '^\s*([^=]+?)\s*=\s*(.+)$') {
+            $label   = $Matches[1]
+            $display = $label
+            $conds   = @($Matches[2] -split ';' | Where-Object { $_.Trim() } | ForEach-Object {
+                $p = $_.Trim() -replace "'", "''"
+                if ($p -match '\\') { "ExecutablePath LIKE '$($p -replace '\\', '\\')'" } else { "Name LIKE '$p'" }
+            })
+            $filter  = $conds -join ' OR '
+        } else {
+            $label   = $name -replace '\.exe$', ''
+            $display = "$label.exe"
+            $filter  = "Name='$("$label.exe" -replace "'", "''")'"
+        }
         $rows  = @()
         try {
-            $rows = @(Get-CimInstance -ClassName Win32_Process -Filter "Name='$exe'" `
-                        -Property ProcessId, ExecutablePath, CommandLine, CreationDate, KernelModeTime,
+            $rows = @(Get-CimInstance -ClassName Win32_Process -Filter $filter `
+                        -Property ProcessId, Name, ExecutablePath, CommandLine, CreationDate, KernelModeTime,
                                   UserModeTime, WorkingSetSize, PrivatePageCount, ReadTransferCount,
                                   WriteTransferCount -ErrorAction Stop)
         } catch {
@@ -884,12 +926,13 @@ function Get-WatchedProcesses {
 
             $list.Add([pscustomobject][ordered]@{
                 pid = $procId
-                r   = (Get-ProcessRole -CommandLine $r.CommandLine -ExePath $r.ExecutablePath)
+                r   = (Get-ProcessRole -CommandLine $r.CommandLine -ExePath $r.ExecutablePath -Name $r.Name)
                 cpu = $cpu; ws = $ws; pv = $pv; io = $io; gpu = $gpu
             })
         }
 
         $out[$label] = [pscustomobject][ordered]@{
+            lbl = $display
             n   = $list.Count
             cpu = $(if ($null -ne $tCpu) { [math]::Round($tCpu, 2) } else { $null })
             ws  = [math]::Round($tWs, 0)

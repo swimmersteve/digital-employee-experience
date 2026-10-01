@@ -422,10 +422,10 @@ its busiest engine, as Task Manager does, and same-named instances are summed an
 clamped at 100%. Processes at 0% are left out, so on an idle office machine the pane
 says the GPU was idle rather than drawing ten empty bars.
 
-### Watched processes — claude.exe (1.10.0)
+### Watched processes — claude.exe and Codex (1.10.0, Codex 1.12.0)
 
-Below the top-10 panes, the dashboard has a section for each name in the
-collector's `-WatchProcess` (default `claude`): **four charts** — CPU, private
+Below the top-10 panes, the dashboard has a section for each entry in the
+collector's `-WatchProcess` (default: `claude` and Codex): **four charts** — CPU, private
 memory, disk I/O and GPU for all running instances combined, over the selected
 range, coloured like the machine-wide row above. Click a point on any chart and the
 headline figures rewind to that moment along with the rest of the page.
@@ -456,6 +456,24 @@ name; about 80 ms a run. Storage cost is about 90 bytes per instance per sample 
 roughly 1.2 KB a minute for the desktop app plus one Claude Code session, which
 roughly doubles `perf.ndjson`/`perf.js`. Pass `-WatchProcess @()` to turn it off, or
 `-WatchProcess claude, Teams` to watch more than one app.
+
+**Apps that aren't one exe.** An entry can also be `Label=pattern;pattern` — WQL
+`LIKE` patterns (`%` any, `_` one character, `[_]` a literal underscore), matched
+against the install path when the pattern contains a backslash and the exe name
+otherwise. Codex needs this: its desktop app runs as **ChatGPT.exe** from the
+`OpenAI.Codex` package, alongside `codex.exe` agents and `codex-*.exe` helpers, and
+watching plain `ChatGPT` would also catch the unrelated ChatGPT app. The default
+entry is:
+
+```powershell
+-WatchProcess 'claude', 'Codex=codex%;%\OpenAI.Codex[_]%'
+```
+
+Codex roles: the Electron processes decode like Claude's (Main, Renderer, GPU
+process, services); `codex.exe` is labelled by its subcommand (`codex app-server`,
+`codex exec-server`); `codex-computer-use-swift.exe` is **Computer use** and
+`codex-windows-sandbox-service.exe` the **Sandbox service**. The section header
+uses the label (`Codex`), where a bare name shows as `claude.exe`.
 
 #### What the disk pane actually measures (1.8.0)
 
